@@ -68,29 +68,29 @@ export function RecordingHistory() {
         window.removeEventListener('storage', handleStorageChange);
         if(audioRef.current) {
             audioRef.current.pause();
+            audioRef.current.src = "";
             audioRef.current = null;
         }
     }
   }, [])
 
   useEffect(() => {
+    const audioEl = audioRef.current;
     if (playingId) {
       const recording = recordings.find(r => r.id === playingId);
       if (recording?.audioUrl) {
-        if (!audioRef.current) {
+        if (!audioEl) {
           audioRef.current = new Audio();
           audioRef.current.addEventListener('ended', () => setPlayingId(null));
           audioRef.current.addEventListener('pause', () => {
-            // Only nullify if it wasn't an explicit pause from the user
-            if(audioRef.current?.paused && !audioRef.current.ended) {
-               // setPlayingId(null);
-            }
+             // This is to handle the case where the user seeks, etc.
+             // We only set playingId to null on 'ended' event.
           });
         }
-        if(audioRef.current.src !== recording.audioUrl) {
+        if(audioRef.current && audioRef.current.src !== recording.audioUrl) {
             audioRef.current.src = recording.audioUrl;
         }
-        audioRef.current.play().catch(e => {
+        audioRef.current?.play().catch(e => {
             toast.error("Could not play audio", { description: e.message });
             setPlayingId(null);
         });
@@ -98,8 +98,8 @@ export function RecordingHistory() {
           toast.warning("No audio available for this entry.");
           setPlayingId(null);
       }
-    } else if (audioRef.current) {
-      audioRef.current.pause();
+    } else if (audioEl) {
+      audioEl.pause();
     }
   }, [playingId, recordings]);
 
@@ -135,7 +135,7 @@ export function RecordingHistory() {
     }
     const a = document.createElement("a")
     a.href = recording.audioUrl
-    a.download = `recording-${new Date(recording.timestamp).toISOString()}.webm`
+    a.download = `sesame-recording-${new Date(recording.timestamp).toISOString()}.webm`
     document.body.appendChild(a)
     a.click()
     a.remove()
@@ -224,7 +224,7 @@ export function RecordingHistory() {
             </div>
           ) : (
             <div className="space-y-2 pr-4">
-              <TooltipProvider>
+              <TooltipProvider delayDuration={100}>
               {recordings.map((recording) => (
                 <div key={recording.id} className="flex items-center justify-between p-3 bg-background/50 rounded-lg hover:bg-accent/50 transition-colors group">
                   <div className="flex-1 min-w-0 flex items-center gap-4">

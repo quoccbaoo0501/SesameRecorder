@@ -25,7 +25,8 @@ import {
   History,
   LineChart,
   BrainCircuit,
-  Volume2
+  Volume2,
+  Sparkles,
 } from "lucide-react"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { toast } from "sonner"
@@ -73,7 +74,7 @@ export default function RecorderUI() {
   const [error, setError] = useState<string | null>(null)
   
   const [captureMode, setCaptureMode] = useState<"microphone" | "desktop" | "both">("both")
-  const [isListeningForAI, setIsListeningForAI] = useState(false)
+  const [isAiSpeaking, setIsAiSpeaking] = useState(false)
   const [isBrowserSupported, setIsBrowserSupported] = useState(true);
 
   const scrollAreaRef = useRef<HTMLDivElement>(null)
@@ -85,7 +86,6 @@ export default function RecorderUI() {
   const mediaRecorderRef = useRef<MediaRecorder | null>(null)
   const audioChunksRef = useRef<Blob[]>([])
   const recognitionRef = useRef<SpeechRecognition | null>(null)
-  const aiRecognitionRef = useRef<SpeechRecognition | null>(null)
   
   const userMicStreamRef = useRef<MediaStream | null>(null);
   const desktopStreamRef = useRef<MediaStream | null>(null);
@@ -99,6 +99,69 @@ export default function RecorderUI() {
     language: "en-US",
     sensitivity: 50,
   })
+
+  const mockAiResponses = [
+      "That's a fascinating point. From my perspective, the integration of AI in creative fields will likely serve as a powerful augmentation tool, rather than a replacement for human artists.",
+      "Could you clarify what you mean by 'ethical frameworks'? Are you referring to data privacy, algorithmic bias, or the potential for job displacement?",
+      "I've processed your request. The analysis indicates a strong correlation between user engagement and the new feature rollout. I suggest we proceed with a full launch next quarter.",
+      "To achieve that, you could use a combination of CSS transitions for the visual effects and the Web Audio API for generating the corresponding soundscapes. It's a powerful combination.",
+      "An interesting alternative to consider would be using a state machine library like XState. It can help manage complex UI logic more predictably, especially in applications like this one."
+  ];
+
+  const generateAndSpeakAIResponse = useCallback(() => {
+    const aiText = mockAiResponses[Math.floor(Math.random() * mockAiResponses.length)];
+
+    const addTranscriptEntry = () => {
+        const newEntry: TranscriptEntry = {
+            id: `ai-${Date.now()}`,
+            timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+            speaker: 'ai',
+            text: aiText,
+            source: 'system',
+            confidence: 0.99
+        };
+        setTranscript(prev => [...prev, newEntry]);
+    };
+
+    if (typeof window === 'undefined' || !window.speechSynthesis) {
+        toast.warning("Speech Synthesis not supported in this browser.");
+        addTranscriptEntry();
+        return;
+    }
+
+    // Stop any currently speaking utterance
+    window.speechSynthesis.cancel();
+    
+    const utterance = new SpeechSynthesisUtterance(aiText);
+    const voices = window.speechSynthesis.getVoices();
+    const preferredVoices = [ "Google US English", "Microsoft Zira - English (United States)", "Samantha", "Daniel" ];
+    let selectedVoice = voices.find(v => preferredVoices.includes(v.name));
+    if (!selectedVoice) selectedVoice = voices.find(v => v.lang.startsWith('en-US') && v.name.includes("Google"));
+    if (!selectedVoice) selectedVoice = voices.find(v => v.lang.startsWith('en'));
+    
+    if (selectedVoice) utterance.voice = selectedVoice;
+    utterance.pitch = 1;
+    utterance.rate = 1.1;
+
+    utterance.onstart = () => {
+        setIsAiSpeaking(true);
+        addTranscriptEntry();
+        toast.info("AI is responding...");
+    };
+
+    utterance.onend = () => setIsAiSpeaking(false);
+    utterance.onerror = (e) => {
+        console.error("SpeechSynthesis error", e);
+        setIsAiSpeaking(false);
+        toast.error("AI speech error", { description: e.error });
+        // Still add to transcript if speaking failed
+        if (!transcript.some(entry => entry.text === aiText)) {
+            addTranscriptEntry();
+        }
+    };
+
+    window.speechSynthesis.speak(utterance);
+  }, [transcript]);
 
   const formatDuration = (seconds: number) => {
     const mins = Math.floor(seconds / 60)
@@ -139,7 +202,9 @@ export default function RecorderUI() {
 
   const setupAudioVisualizer = useCallback(
     (stream: MediaStream) => {
-      if (audioContextRef.current?.state === 'running') return;
+      if (audioContextRef.current?.state === 'running') {
+        audioContextRef.current.close();
+      };
 
       const audioContext = new (window.AudioContext || window.webkitAudioContext)()
       const analyser = audioContext.createAnalyser()
@@ -187,102 +252,6 @@ export default function RecorderUI() {
       throw new Error(message);
     }
   };
-
-  const setupAiSpeechRecognition = useCallback((stream: MediaStream) => {
-    if (!SpeechRecognition) return;
-
-    // Create a new audio context to process the stream for recognition
-    const recognitionAudioContext = new AudioContext();
-    const source = recognitionAudioContext.createMediaStreamSource(stream);
-    
-    // Gain to boost volume for better recognition
-    const gainNode = recognitionAudioContext.createGain();
-    gainNode.gain.value = 2.0;
-
-    // Filter to remove low-frequency noise
-    const highpass = recognitionAudioContext.createBiquadFilter();
-    highpass.type = "highpass";
-    highpass.frequency.value = 200;
-
-    const destination = recognitionAudioContext.createMediaStreamDestination();
-    
-    source.connect(highpass);
-    highpass.connect(gainNode);
-    gainNode.connect(destination);
-    
-    const recognition = new SpeechRecognition();
-    recognition.continuous = true;
-    recognition.interimResults = false; // We only want final results for AI
-    recognition.lang = audioSettings.language;
-    aiRecognitionRef.current = recognition;
-
-    recognition.onstart = () => {
-      console.log("AI speech recognition started.");
-      setIsListeningForAI(true);
-    };
-
-    recognition.onend = () => {
-      console.log("AI speech recognition ended.");
-      setIsListeningForAI(false);
-      // Automatically restart if we are still in a recording session
-      if (mediaRecorderRef.current?.state === "recording") {
-        setTimeout(() => aiRecognitionRef.current?.start(), 100);
-      } else {
-        recognitionAudioContext.close().catch(console.error);
-      }
-    };
-
-    recognition.onerror = (event) => {
-      console.error("AI recognition error:", event.error);
-      if (event.error !== 'no-speech' && event.error !== 'aborted') {
-        toast.error("AI recognition error", { description: event.error });
-      }
-    };
-
-    recognition.onresult = (event) => {
-      let aiTranscript = "";
-      for (let i = event.resultIndex; i < event.results.length; ++i) {
-        if (event.results[i].isFinal) {
-          aiTranscript += event.results[i][0].transcript;
-        }
-      }
-
-      if (aiTranscript.trim()) {
-        console.log(`AI said: ${aiTranscript}`);
-        const newEntry: TranscriptEntry = {
-          id: `ai-${Date.now()}`,
-          timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }),
-          speaker: "ai",
-          text: aiTranscript.trim(),
-          source: "system",
-          confidence: event.results[event.resultIndex]?.[0]?.confidence || 0.8,
-        };
-        setTranscript(prev => [...prev, newEntry]);
-        toast.info("AI response transcribed!");
-      }
-    };
-
-    // Use the processed stream for recognition
-    const processedStreamForRecognition = destination.stream;
-    
-    try {
-        // Some browsers require the stream to be assigned this way
-        // This is a non-standard property
-        (recognition as any).mediaStream = processedStreamForRecognition;
-        recognition.start();
-    } catch(e) {
-        console.error("Could not start AI recognition with processed stream, trying direct stream.", e);
-        // Fallback to direct stream if the above fails
-        const originalAudioTrack = stream.getAudioTracks()[0];
-        if (originalAudioTrack) {
-            const streamForRecognition = new MediaStream([originalAudioTrack]);
-             (recognition as any).mediaStream = streamForRecognition;
-            recognition.start();
-        } else {
-            console.error("No audio track on AI stream to fall back to.");
-        }
-    }
-  }, [audioSettings.language]);
 
   const startRecording = async () => {
     setError(null);
@@ -380,6 +349,11 @@ export default function RecorderUI() {
               interimTranscript += event.results[i][0].transcript;
             }
           }
+          
+          if (interimTranscript.trim()) {
+            setCurrentTranscript(interimTranscript);
+          }
+
           if (finalTranscript.trim()) {
             const newEntry: TranscriptEntry = {
               id: `user-${Date.now()}`,
@@ -391,9 +365,14 @@ export default function RecorderUI() {
             };
             setTranscript((prev) => [...prev, newEntry]);
             setCurrentTranscript("");
-          }
-          if (interimTranscript.trim()) {
-            setCurrentTranscript(interimTranscript);
+
+            // Trigger AI response
+            if (isRecording && (captureMode === 'desktop' || captureMode === 'both') && !isAiSpeaking) {
+                // Use a timeout to simulate the AI "thinking"
+                setTimeout(() => {
+                    generateAndSpeakAIResponse();
+                }, 800 + Math.random() * 1200);
+            }
           }
         };
 
@@ -414,10 +393,6 @@ export default function RecorderUI() {
         recognition.start();
       }
 
-      if (desktopStreamRef.current && desktopStreamRef.current.getAudioTracks().length > 0) {
-        setupAiSpeechRecognition(desktopStreamRef.current);
-      }
-
       // 5. Start everything
       recorder.start(1000);
       setIsRecording(true);
@@ -426,7 +401,7 @@ export default function RecorderUI() {
       setCurrentTranscript("");
       setupAudioVisualizer(combinedStream);
       toast.success("Recording has started!", {
-        description: `Mode: ${captureMode}. AI speech recognition is ${desktopStreamRef.current ? 'active' : 'inactive'}.`
+        description: `Mode: ${captureMode}. AI responses will be ${desktopStreamRef.current ? 'audible & transcribed' : 'transcribed only'}.`
       });
 
     } catch (err) {
@@ -446,12 +421,12 @@ export default function RecorderUI() {
     if (recognitionRef.current) {
       recognitionRef.current.stop();
     }
-    if (aiRecognitionRef.current) {
-      aiRecognitionRef.current.stop();
+    if (window.speechSynthesis) {
+        window.speechSynthesis.cancel();
     }
 
     setIsRecording(false);
-    setIsListeningForAI(false);
+    setIsAiSpeaking(false);
     setCurrentTranscript("");
 
     if (audioChunksRef.current.length > 0) {
@@ -517,6 +492,13 @@ export default function RecorderUI() {
         toast.warning("Browser not fully supported", { description: "Please use a modern browser like Chrome or Firefox for the best experience." });
     }
 
+    // Ensure we have voices for speech synthesis
+    if (typeof window !== 'undefined' && window.speechSynthesis) {
+        window.speechSynthesis.onvoiceschanged = () => {
+            window.speechSynthesis.getVoices();
+        };
+    }
+
     // Cleanup on unmount
     return () => {
       stopAllStreams();
@@ -524,7 +506,7 @@ export default function RecorderUI() {
           mediaRecorderRef.current.stop();
       }
       recognitionRef.current?.stop();
-      aiRecognitionRef.current?.stop();
+      if (window.speechSynthesis) window.speechSynthesis.cancel();
       cleanupAudioProcessing();
     };
   }, [cleanupAudioProcessing, stopAllStreams]);
@@ -659,9 +641,9 @@ export default function RecorderUI() {
                                 <Badge variant={isRecording ? "destructive" : "secondary"} className="text-sm px-3 py-1 transition-colors">
                                     {isRecording ? "Recording" : isReady ? "Ready" : "Finished"}
                                 </Badge>
-                                {isRecording && isListeningForAI && (
-                                    <Badge variant="outline" className="text-xs border-blue-500 text-blue-500 animate-pulse">
-                                        <Bot className="h-3 w-3 mr-1" /> Listening for AI
+                                {isRecording && isAiSpeaking && (
+                                    <Badge variant="outline" className="text-xs border-purple-500 text-purple-500 animate-pulse">
+                                        <Sparkles className="h-3 w-3 mr-1" /> AI Speaking
                                     </Badge>
                                 )}
                                 </div>
