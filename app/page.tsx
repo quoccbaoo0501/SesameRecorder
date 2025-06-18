@@ -234,7 +234,7 @@ export default function RecorderUI() {
 
     recognition.onerror = (event) => {
       console.error("AI recognition error:", event.error);
-      if (event.error !== 'no-speech') {
+      if (event.error !== 'no-speech' && event.error !== 'aborted') {
         toast.error("AI recognition error", { description: event.error });
       }
     };
@@ -267,15 +267,20 @@ export default function RecorderUI() {
     
     try {
         // Some browsers require the stream to be assigned this way
+        // This is a non-standard property
         (recognition as any).mediaStream = processedStreamForRecognition;
         recognition.start();
     } catch(e) {
         console.error("Could not start AI recognition with processed stream, trying direct stream.", e);
         // Fallback to direct stream if the above fails
         const originalAudioTrack = stream.getAudioTracks()[0];
-        const streamForRecognition = new MediaStream([originalAudioTrack]);
-        (recognition as any).mediaStream = streamForRecognition;
-        recognition.start();
+        if (originalAudioTrack) {
+            const streamForRecognition = new MediaStream([originalAudioTrack]);
+             (recognition as any).mediaStream = streamForRecognition;
+            recognition.start();
+        } else {
+            console.error("No audio track on AI stream to fall back to.");
+        }
     }
   }, [audioSettings.language]);
 
@@ -409,7 +414,7 @@ export default function RecorderUI() {
         recognition.start();
       }
 
-      if (desktopStreamRef.current) {
+      if (desktopStreamRef.current && desktopStreamRef.current.getAudioTracks().length > 0) {
         setupAiSpeechRecognition(desktopStreamRef.current);
       }
 
@@ -426,8 +431,9 @@ export default function RecorderUI() {
 
     } catch (err) {
       console.error("Error starting recording:", err);
-      setError(`Failed to start recording: ${err.message}.`);
-      toast.error("Failed to start recording", { description: err.message });
+      const typedError = err as Error;
+      setError(`Failed to start recording: ${typedError.message}.`);
+      toast.error("Failed to start recording", { description: typedError.message });
       stopAllStreams();
       setIsRecording(false);
     }
@@ -447,7 +453,6 @@ export default function RecorderUI() {
     setIsRecording(false);
     setIsListeningForAI(false);
     setCurrentTranscript("");
-    toast.success("Recording stopped and saved to History tab.");
 
     if (audioChunksRef.current.length > 0) {
       const audioBlob = new Blob(audioChunksRef.current, { type: getSupportedMimeType() || "audio/webm" });
@@ -459,16 +464,19 @@ export default function RecorderUI() {
         audioSize: audioBlob.size,
         transcript: JSON.stringify(transcript),
         captureMode,
-        audioUrl: URL.createObjectURL(audioBlob), // For playback in history
+        audioUrl: URL.createObjectURL(audioBlob),
       };
 
       try {
         const savedRecordings = JSON.parse(localStorage.getItem("sesame-recordings") || "[]");
         savedRecordings.unshift(newRecording);
-        localStorage.setItem("sesame-recordings", JSON.stringify(savedRecordings.slice(0, 20))); // Keep last 20
+        localStorage.setItem("sesame-recordings", JSON.stringify(savedRecordings.slice(0, 50))); // Keep last 50
+        toast.success("Recording stopped and saved to History tab.");
       } catch (e) {
         toast.error("Failed to save recording", { description: "Your browser storage might be full."});
       }
+    } else {
+        toast.info("Recording stopped. No audio data was captured to save.");
     }
   };
 
@@ -530,7 +538,7 @@ export default function RecorderUI() {
     const url = URL.createObjectURL(audioBlob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `recording-${new Date().toISOString()}.webm`;
+    a.download = `sesame-recording-${new Date().toISOString()}.webm`;
     document.body.appendChild(a);
     a.click();
     a.remove();
@@ -552,7 +560,7 @@ export default function RecorderUI() {
     const a = document.createElement("a");
     a.style.display = "none";
     a.href = url;
-    a.download = `transcript-${new Date().toISOString()}.txt`;
+    a.download = `sesame-transcript-${new Date().toISOString()}.txt`;
     document.body.appendChild(a);
     a.click();
     a.remove();
@@ -567,11 +575,11 @@ export default function RecorderUI() {
     <div className="min-h-screen bg-gradient-to-br from-slate-50 to-slate-200 dark:from-gray-900 dark:to-slate-900 p-4 sm:p-6 lg:p-8 transition-colors duration-300">
       <div className="mx-auto max-w-7xl space-y-6">
         <header className="text-center space-y-2">
-          <h1 className="text-3xl sm:text-4xl font-bold tracking-tight text-slate-800 dark:text-slate-100 flex items-center justify-center gap-2">
-            <BrainCircuit className="text-emerald-500"/> Sesame Recorder
+          <h1 className="text-3xl sm:text-4xl font-bold tracking-tight text-slate-800 dark:text-slate-100 flex items-center justify-center gap-3">
+            <BrainCircuit className="text-emerald-500 w-8 h-8"/> Sesame Recorder
           </h1>
-          <p className="text-slate-600 dark:text-slate-400 text-balance">
-            Capture, transcribe, and analyze your conversations with AI, seamlessly.
+          <p className="text-slate-600 dark:text-slate-400 text-balance max-w-2xl mx-auto">
+            The intelligent recording tool that captures, transcribes, and analyzes your conversations with AI, seamlessly.
           </p>
         </header>
 
@@ -579,7 +587,7 @@ export default function RecorderUI() {
             <Alert variant="destructive">
                 <AlertTriangle className="h-4 w-4" />
                 <AlertTitle>Browser Not Supported</AlertTitle>
-                <AlertDescription>Your browser lacks full support for the technologies this app relies on (SpeechRecognition, MediaRecorder). Please switch to a recent version of Google Chrome or Firefox on a desktop computer.</AlertDescription>
+                <AlertDescription>Your browser lacks full support for the technologies this app relies on (SpeechRecognition, MediaRecorder). Please switch to a recent version of Google Chrome or Firefox on a desktop computer for full functionality.</AlertDescription>
             </Alert>
         )}
 
@@ -624,7 +632,7 @@ export default function RecorderUI() {
                             {/* Capture Mode Selection */}
                             <div className="w-full space-y-2">
                                 <Label className="text-sm font-medium">Capture Mode</Label>
-                                <div className="flex space-x-2">
+                                <div className="grid grid-cols-3 gap-2">
                                     <Button variant={captureMode === "microphone" ? "default" : "outline"} size="sm" onClick={() => setCaptureMode("microphone")} className="flex-1">
                                         <Mic className="h-4 w-4 mr-2" /> Mic Only
                                     </Button>
@@ -640,7 +648,7 @@ export default function RecorderUI() {
                             {/* Main Recording Button */}
                             <Button onClick={handleToggleRecording} size="lg" disabled={!isBrowserSupported}
                                 className={cn("h-24 w-24 rounded-full text-white shadow-lg transition-all duration-300 transform hover:scale-105 active:scale-95 focus-visible:ring-4 focus-visible:ring-offset-2 focus-visible:ring-offset-background",
-                                    isRecording ? "bg-red-500 hover:bg-red-600 animate-pulse ring-red-300" : "bg-emerald-500 hover:bg-emerald-600 ring-emerald-300"
+                                    isRecording ? "bg-red-500 hover:bg-red-600 animate-pulse ring-red-300 dark:ring-red-500/50" : "bg-emerald-500 hover:bg-emerald-600 ring-emerald-300 dark:ring-emerald-500/50"
                                 )}>
                                 {isRecording ? <MicOff className="h-8 w-8" /> : <Mic className="h-8 w-8" />}
                             </Button>
@@ -668,7 +676,7 @@ export default function RecorderUI() {
                                 <div className="flex items-center justify-center space-x-1 h-16 bg-slate-100 dark:bg-slate-800/50 rounded-lg p-2 overflow-hidden">
                                 {Array.from({ length: 50 }).map((_, i) => (
                                     <div key={i} className="w-1 bg-emerald-400 rounded-full transition-all duration-100"
-                                    style={{ height: `${Math.min(100, isRecording ? (audioLevel/255)*100 * (1 + Math.sin(i/2)) : 0)}%` }}
+                                    style={{ height: `${Math.min(100, isRecording ? (audioLevel/255)*150 * (1 + Math.sin(i/2)) : 0)}%` }}
                                     />
                                 ))}
                                 </div>
@@ -734,7 +742,7 @@ export default function RecorderUI() {
 
                             {currentTranscript && (
                                 <div className="flex items-start gap-3 justify-end opacity-60">
-                                    <div className="max-w-md space-y-1 text-right">
+                                    <div className="max-w-md flex flex-col items-end space-y-1">
                                         <div className="flex items-center gap-2 justify-end">
                                             <span className="font-bold text-sm">You</span>
                                         </div>
@@ -767,7 +775,7 @@ export default function RecorderUI() {
             <AnalyticsDashboard />
           </TabsContent>
           <TabsContent value="settings">
-            <AudioSettings onSettingsChange={setAudioSettings} />
+            <AudioSettings initialSettings={audioSettings} onSettingsChange={setAudioSettings} />
           </TabsContent>
         </Tabs>
       </div>

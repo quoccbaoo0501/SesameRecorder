@@ -1,11 +1,11 @@
 "use client"
 
 import { useState, useEffect, useRef } from "react"
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { ScrollArea } from "@/components/ui/scroll-area"
-import { Trash2, Download, Clock, FileText, Play, Pause, AlertCircle, History } from "lucide-react"
+import { Trash2, Download, History, Play, Pause, AlertCircle, FileText, Monitor, Mic } from "lucide-react"
 import { toast } from "sonner"
 import {
   AlertDialog,
@@ -18,6 +18,7 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog"
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 
 interface RecordingEntry {
   id: string
@@ -25,32 +26,46 @@ interface RecordingEntry {
   duration: number
   transcriptLength: number
   audioSize: number
-  audioUrl: string
+  audioUrl: string | null
   transcript: string
-  captureMode: string
+  captureMode: "microphone" | "desktop" | "both"
 }
 
 export function RecordingHistory() {
   const [recordings, setRecordings] = useState<RecordingEntry[]>([])
   const [playingId, setPlayingId] = useState<string | null>(null)
+  const [_, setForceRender] = useState(0); // to re-render on storage change
   const audioRef = useRef<HTMLAudioElement | null>(null)
 
   useEffect(() => {
-    const saved = localStorage.getItem("sesame-recordings")
-    if (saved) {
-      try {
-        const parsedRecordings = JSON.parse(saved);
-        // Ensure audioUrl is present, older recordings might not have it
-        const sanitized = parsedRecordings.map(rec => ({ ...rec, audioUrl: rec.audioUrl || null }));
-        setRecordings(sanitized)
-      } catch (error) {
-        console.error("Failed to load recordings:", error)
-        localStorage.removeItem("sesame-recordings"); // Clear corrupted data
+    const loadRecordings = () => {
+       const saved = localStorage.getItem("sesame-recordings")
+        if (saved) {
+            try {
+                const parsed = JSON.parse(saved) as RecordingEntry[];
+                setRecordings(parsed.map(rec => ({ ...rec, audioUrl: rec.audioUrl || null })));
+            } catch (error) {
+                console.error("Failed to load recordings:", error)
+                localStorage.removeItem("sesame-recordings"); 
+            }
+        } else {
+          setRecordings([]);
+        }
+    }
+    
+    loadRecordings();
+    
+    const handleStorageChange = (e: StorageEvent) => {
+      if (e.key === "sesame-recordings") {
+        loadRecordings();
+        setForceRender(c => c + 1);
       }
     }
 
-    // Audio player cleanup
+    window.addEventListener('storage', handleStorageChange)
+
     return () => {
+        window.removeEventListener('storage', handleStorageChange);
         if(audioRef.current) {
             audioRef.current.pause();
             audioRef.current = null;
@@ -59,16 +74,22 @@ export function RecordingHistory() {
   }, [])
 
   useEffect(() => {
-    // This effect handles playing/pausing audio
-    if (playingId && recordings.length > 0) {
+    if (playingId) {
       const recording = recordings.find(r => r.id === playingId);
       if (recording?.audioUrl) {
         if (!audioRef.current) {
-          audioRef.current = new Audio(recording.audioUrl);
+          audioRef.current = new Audio();
           audioRef.current.addEventListener('ended', () => setPlayingId(null));
-          audioRef.current.addEventListener('pause', () => setPlayingId(null));
+          audioRef.current.addEventListener('pause', () => {
+            // Only nullify if it wasn't an explicit pause from the user
+            if(audioRef.current?.paused && !audioRef.current.ended) {
+               // setPlayingId(null);
+            }
+          });
         }
-        audioRef.current.src = recording.audioUrl;
+        if(audioRef.current.src !== recording.audioUrl) {
+            audioRef.current.src = recording.audioUrl;
+        }
         audioRef.current.play().catch(e => {
             toast.error("Could not play audio", { description: e.message });
             setPlayingId(null);
@@ -86,15 +107,23 @@ export function RecordingHistory() {
   const saveRecordings = (newRecordings: RecordingEntry[]) => {
     setRecordings(newRecordings)
     localStorage.setItem("sesame-recordings", JSON.stringify(newRecordings))
+     window.dispatchEvent(new StorageEvent('storage', {key: 'sesame-recordings'}));
   }
 
   const deleteRecording = (id: string) => {
+    const recordingToDelete = recordings.find(r => r.id === id);
+    if(recordingToDelete?.audioUrl) {
+        URL.revokeObjectURL(recordingToDelete.audioUrl);
+    }
     const updated = recordings.filter((r) => r.id !== id)
     saveRecordings(updated)
     toast.success("Recording deleted")
   }
 
   const deleteAllRecordings = () => {
+      recordings.forEach(rec => {
+          if (rec.audioUrl) URL.revokeObjectURL(rec.audioUrl);
+      })
       saveRecordings([]);
       toast.success("All recordings have been deleted.");
   }
@@ -110,35 +139,39 @@ export function RecordingHistory() {
     document.body.appendChild(a)
     a.click()
     a.remove()
-    toast.success("Download started")
+    toast.success("Audio download started")
   }
   
   const downloadTranscript = (recording: RecordingEntry) => {
-      const transcriptData = JSON.parse(recording.transcript);
-      if(transcriptData.length === 0) {
-          toast.error("No transcript to download.");
-          return;
-      }
-      const transcriptText = transcriptData.map(
-        (entry: any) => `[${entry.timestamp}] ${entry.speaker.toUpperCase()}: ${entry.text}`
-      ).join("\n\n");
+      try {
+          const transcriptData = JSON.parse(recording.transcript);
+          if(transcriptData.length === 0) {
+              toast.error("No transcript to download.");
+              return;
+          }
+          const transcriptText = transcriptData.map(
+            (entry: any) => `[${entry.timestamp}] ${entry.speaker.toUpperCase()}: ${entry.text}`
+          ).join("\n\n");
 
-      const blob = new Blob([transcriptText], { type: "text/plain" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `transcript-${new Date(recording.timestamp).toISOString()}.txt`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
-      toast.success("Transcript download started.");
+          const blob = new Blob([transcriptText], { type: "text/plain" });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement("a");
+          a.href = url;
+          a.download = `transcript-${new Date(recording.timestamp).toISOString()}.txt`;
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          URL.revokeObjectURL(url);
+          toast.success("Transcript download started.");
+      } catch {
+          toast.error("Failed to parse transcript data.");
+      }
   }
 
   const formatDuration = (seconds: number) => {
     const mins = Math.floor(seconds / 60)
     const secs = Math.floor(seconds % 60)
-    return `${mins}:${secs.toString().padStart(2, "0")}`
+    return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, "0")}`
   }
 
   const formatFileSize = (bytes: number) => {
@@ -151,15 +184,12 @@ export function RecordingHistory() {
   return (
     <Card className="border-0 shadow-lg bg-card/80 backdrop-blur-sm">
       <CardHeader className="flex flex-row items-center justify-between">
-        <div className="space-y-1">
+        <div>
             <CardTitle className="flex items-center space-x-2">
-            <Clock className="h-5 w-5" />
+            <History className="h-5 w-5" />
             <span>Recording History</span>
-            <Badge variant="secondary" className="ml-auto">
-                {recordings.length}
-            </Badge>
             </CardTitle>
-            <p className="text-sm text-muted-foreground">Review and manage your past recordings.</p>
+            <CardDescription>Review and manage your past {recordings.length} recordings.</CardDescription>
         </div>
         {recordings.length > 0 && (
             <AlertDialog>
@@ -178,7 +208,7 @@ export function RecordingHistory() {
                     </AlertDialogHeader>
                     <AlertDialogFooter>
                         <AlertDialogCancel>Cancel</AlertDialogCancel>
-                        <AlertDialogAction onClick={deleteAllRecordings}>Yes, delete all</AlertDialogAction>
+                        <AlertDialogAction className="bg-destructive hover:bg-destructive/90" onClick={deleteAllRecordings}>Yes, delete all</AlertDialogAction>
                     </AlertDialogFooter>
                 </AlertDialogContent>
             </AlertDialog>
@@ -187,40 +217,49 @@ export function RecordingHistory() {
       <CardContent>
         <ScrollArea className="h-[40rem]">
           {recordings.length === 0 ? (
-            <div className="text-center text-slate-400 dark:text-slate-500 py-16 flex flex-col items-center justify-center">
-              <History className="h-12 w-12 mx-auto mb-4 opacity-30" />
+            <div className="text-center text-slate-400 dark:text-slate-500 py-16 flex flex-col items-center justify-center h-full">
+              <History className="h-16 w-16 mx-auto mb-4 opacity-30" />
               <h3 className="font-semibold text-lg">No recordings yet</h3>
-              <p className="text-sm">Your saved recordings will appear here.</p>
+              <p className="text-sm">Your saved recordings will appear here when you're done.</p>
             </div>
           ) : (
-            <div className="space-y-3 pr-4">
+            <div className="space-y-2 pr-4">
+              <TooltipProvider>
               {recordings.map((recording) => (
-                <div key={recording.id} className="flex items-center justify-between p-3 bg-slate-50 dark:bg-slate-800/50 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors group">
+                <div key={recording.id} className="flex items-center justify-between p-3 bg-background/50 rounded-lg hover:bg-accent/50 transition-colors group">
                   <div className="flex-1 min-w-0 flex items-center gap-4">
                     <Button variant="outline" size="icon" className="h-10 w-10 shrink-0" onClick={() => setPlayingId(playingId === recording.id ? null : recording.id)} disabled={!recording.audioUrl}>
-                        {!recording.audioUrl ? <AlertCircle className="h-5 w-5 text-muted-foreground" /> : playingId === recording.id ? <Pause className="h-5 w-5"/> : <Play className="h-5 w-5"/>}
+                        {!recording.audioUrl ? <AlertCircle className="h-5 w-5 text-muted-foreground" /> : playingId === recording.id ? <Pause className="h-5 w-5 animate-pulse"/> : <Play className="h-5 w-5"/>}
                     </Button>
-                    <div>
+                    <div className="min-w-0">
                         <p className="text-sm font-medium text-slate-800 dark:text-slate-200 truncate">{new Date(recording.timestamp).toLocaleString()}</p>
-                        <div className="text-xs text-slate-500 dark:text-slate-400 flex items-center gap-2 flex-wrap">
-                            <span><Badge variant="outline">{formatDuration(recording.duration)}</Badge></span>
-                            <span>{formatFileSize(recording.audioSize)}</span>
-                            <span className="capitalize"><Badge variant="secondary">{recording.captureMode}</Badge></span>
+                        <div className="text-xs text-muted-foreground flex items-center gap-3 flex-wrap mt-1">
+                            <Badge variant="outline">{formatDuration(recording.duration)}</Badge>
+                            <Badge variant="outline">{formatFileSize(recording.audioSize)}</Badge>
+                            <Badge variant="secondary" className="capitalize flex items-center gap-1">
+                                {recording.captureMode === 'microphone' && <Mic className="h-3 w-3" />}
+                                {recording.captureMode === 'desktop' && <Monitor className="h-3 w-3" />}
+                                {recording.captureMode === 'both' && <><Mic className="h-3 w-3" />+<Monitor className="h-3 w-3" /></>}
+                                {recording.captureMode}
+                            </Badge>
                         </div>
                     </div>
                   </div>
-                  <div className="flex items-center space-x-1 ml-4 opacity-0 group-hover:opacity-100 transition-opacity">
-                    <Button variant="ghost" size="icon" onClick={() => downloadTranscript(recording)} title="Download Transcript">
-                        <FileText className="h-4 w-4" />
-                    </Button>
-                    <Button variant="ghost" size="icon" onClick={() => downloadAudio(recording)} title="Download Audio" disabled={!recording.audioUrl}>
-                      <Download className="h-4 w-4" />
-                    </Button>
+                  <div className="flex items-center space-x-1 ml-4 opacity-0 group-hover:opacity-100 transition-opacity duration-200">
+                    <Tooltip>
+                        <TooltipTrigger asChild><Button variant="ghost" size="icon" onClick={() => downloadTranscript(recording)}><FileText className="h-4 w-4" /></Button></TooltipTrigger>
+                        <TooltipContent><p>Download Transcript (.txt)</p></TooltipContent>
+                    </Tooltip>
+                    <Tooltip>
+                        <TooltipTrigger asChild><Button variant="ghost" size="icon" onClick={() => downloadAudio(recording)} disabled={!recording.audioUrl}><Download className="h-4 w-4" /></Button></TooltipTrigger>
+                        <TooltipContent><p>Download Audio (.webm)</p></TooltipContent>
+                    </Tooltip>
                     <AlertDialog>
                         <AlertDialogTrigger asChild>
-                            <Button variant="ghost" size="icon" className="text-destructive hover:text-destructive hover:bg-destructive/10" title="Delete Recording">
-                                <Trash2 className="h-4 w-4" />
-                            </Button>
+                             <Tooltip>
+                                <TooltipTrigger asChild><Button variant="ghost" size="icon" className="text-destructive hover:text-destructive hover:bg-destructive/10"><Trash2 className="h-4 w-4" /></Button></TooltipTrigger>
+                                <TooltipContent><p>Delete Recording</p></TooltipContent>
+                            </Tooltip>
                         </AlertDialogTrigger>
                         <AlertDialogContent>
                             <AlertDialogHeader>
@@ -238,6 +277,7 @@ export function RecordingHistory() {
                   </div>
                 </div>
               ))}
+              </TooltipProvider>
             </div>
           )}
         </ScrollArea>
