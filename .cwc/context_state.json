@@ -1,0 +1,14 @@
+{
+  "project_path": "C:\\Users\\quocc\\BOP\\SesameRecorder",
+  "unselected_files": [
+    "components.json",
+    "next.config.mjs",
+    "package.json",
+    "pnpm-lock.yaml",
+    "postcss.config.mjs",
+    "README.md",
+    "tailwind.config.ts",
+    "tsconfig.json"
+  ],
+  "readonly_files": []
+}
