@@ -20,6 +20,7 @@ import {
   Headphones,
   User,
   RotateCcw,
+  Info,
 } from "lucide-react"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import type { AudioSettings as AudioSettingsType } from "@/components/audio-settings"
@@ -28,11 +29,15 @@ import { FinalTranscript } from "@/components/final-transcript"
 import { AudioSettings } from "@/components/audio-settings"
 import { GeminiSettings } from "@/components/gemini-settings"
 import { RecordingHistory } from "@/components/recording-history"
+import { ThemeToggle } from "@/components/theme-toggle"
 
 // Add this import after other imports
 declare global {
   interface Window {
     lamejs: any
+    webkitSpeechRecognition: any
+    SpeechRecognition: any
+    webkitAudioContext: any
   }
 }
 
@@ -76,12 +81,32 @@ interface SessionEntry {
   totalWords: number
 }
 
-// Web Speech API Configuration
-const SpeechRecognition = typeof window !== "undefined" && (window.SpeechRecognition || window.webkitSpeechRecognition)
+// Browser compatibility detection
+const getBrowserInfo = () => {
+  const userAgent = navigator.userAgent
+  const isSafari = /^((?!chrome|android).)*safari/i.test(userAgent)
+  const isChrome = /chrome/i.test(userAgent)
+  const isFirefox = /firefox/i.test(userAgent)
+  const isMac = /mac/i.test(navigator.platform)
+
+  return { isSafari, isChrome, isFirefox, isMac }
+}
+
+// Web Speech API Configuration with Safari support
+const getSpeechRecognition = () => {
+  if (typeof window === "undefined") return null
+  return window.SpeechRecognition || window.webkitSpeechRecognition
+}
+
+// Audio Context with Safari support
+const getAudioContext = () => {
+  if (typeof window === "undefined") return null
+  return window.AudioContext || window.webkitAudioContext
+}
 
 const showToast = (message: string, type: "success" | "error" | "loading" = "success") => {
   const notification = document.createElement("div")
-  notification.className = `fixed top-4 right-4 z-50 p-4 rounded-lg shadow-lg text-white transition-all duration-300 ${
+  notification.className = `fixed top-4 left-1/2 transform -translate-x-1/2 z-50 p-4 rounded-lg shadow-lg text-white transition-all duration-300 ${
     type === "success" ? "bg-green-500" : type === "error" ? "bg-red-500" : "bg-blue-500"
   }`
   notification.textContent = message
@@ -191,14 +216,19 @@ const saveSessionToHistory = (sessionData: SessionData) => {
   }
 }
 
-// Convert WebM to MP3 for download
+// Convert WebM to MP3 for download with Safari compatibility
 const convertToMp3 = async (audioBlob: Blob): Promise<Blob> => {
   return new Promise((resolve, reject) => {
     const reader = new FileReader()
     reader.onload = async () => {
       try {
         const arrayBuffer = reader.result as ArrayBuffer
-        const audioContext = new (window.AudioContext || window.webkitAudioContext)({
+        const AudioContextClass = getAudioContext()
+        if (!AudioContextClass) {
+          throw new Error("AudioContext not supported")
+        }
+
+        const audioContext = new AudioContextClass({
           sampleRate: 48000,
         })
         const audioBuffer = await audioContext.decodeAudioData(arrayBuffer)
@@ -249,7 +279,7 @@ const convertToMp3 = async (audioBlob: Blob): Promise<Blob> => {
   })
 }
 
-// Merge multiple audio blobs into one
+// Merge multiple audio blobs into one with Safari compatibility
 const mergeAudioBlobs = async (audioChunks: AudioChunk[]): Promise<Blob> => {
   if (audioChunks.length === 0) {
     throw new Error("No audio chunks to merge")
@@ -260,7 +290,12 @@ const mergeAudioBlobs = async (audioChunks: AudioChunk[]): Promise<Blob> => {
   }
 
   // Create audio context for merging
-  const audioContext = new (window.AudioContext || window.webkitAudioContext)({
+  const AudioContextClass = getAudioContext()
+  if (!AudioContextClass) {
+    throw new Error("AudioContext not supported")
+  }
+
+  const audioContext = new AudioContextClass({
     sampleRate: 48000,
   })
 
@@ -348,6 +383,7 @@ export default function RecorderUI() {
   const [audioChunks, setAudioChunks] = useState<AudioChunk[]>([])
   const [userName, setUserName] = useState("")
   const [geminiApiKeys, setGeminiApiKeys] = useState<string[]>([])
+  const [browserInfo, setBrowserInfo] = useState({ isSafari: false, isChrome: false, isFirefox: false, isMac: false })
 
   const [captureMode, setCaptureMode] = useState<"microphone" | "desktop" | "both">("microphone")
   const [isListeningForAI, setIsListeningForAI] = useState(false)
@@ -381,6 +417,9 @@ export default function RecorderUI() {
 
   // Load user name and session data from localStorage
   useEffect(() => {
+    // Detect browser
+    setBrowserInfo(getBrowserInfo())
+
     const savedUserName = localStorage.getItem("user-name")
     if (savedUserName) {
       setUserName(savedUserName)
@@ -498,8 +537,14 @@ export default function RecorderUI() {
 
   const setupAudioProcessing = useCallback(
     (stream: MediaStream) => {
+      const AudioContextClass = getAudioContext()
+      if (!AudioContextClass) {
+        console.error("AudioContext not supported")
+        return
+      }
+
       if (!audioContextRef.current) {
-        audioContextRef.current = new (window.AudioContext || window.webkitAudioContext)()
+        audioContextRef.current = new AudioContextClass()
       }
       analyserRef.current = audioContextRef.current.createAnalyser()
       analyserRef.current.fftSize = 2048
@@ -515,8 +560,9 @@ export default function RecorderUI() {
     [visualizeAudio],
   )
 
-  // Setup speech recognition
+  // Setup speech recognition with Safari support
   const setupSpeechRecognition = useCallback((onResult: (text: string, isFinal: boolean) => void, language: string) => {
+    const SpeechRecognition = getSpeechRecognition()
     if (!SpeechRecognition) {
       throw new Error("Speech Recognition is not supported in this browser")
     }
@@ -672,6 +718,13 @@ export default function RecorderUI() {
 
   const startDesktopCapture = async () => {
     try {
+      // Safari doesn't support getDisplayMedia with audio
+      if (browserInfo.isSafari) {
+        throw new Error(
+          "🍎 Safari doesn't support desktop audio capture. Please use Chrome, Firefox, or Edge for desktop recording.",
+        )
+      }
+
       const stream = await navigator.mediaDevices.getDisplayMedia({
         audio: {
           echoCancellation: false,
@@ -746,6 +799,14 @@ export default function RecorderUI() {
   const startRecording = async () => {
     setError(null)
 
+    // Check browser compatibility
+    if (browserInfo.isSafari && captureMode === "desktop") {
+      setError(
+        "🍎 Safari doesn't support desktop audio capture. Please switch to microphone mode or use Chrome/Firefox for desktop recording.",
+      )
+      return
+    }
+
     // Save current session to history before starting new one
     const currentSessionData = loadSessionData()
     if (currentSessionData) {
@@ -774,7 +835,7 @@ export default function RecorderUI() {
         try {
           micStream = await navigator.mediaDevices.getUserMedia({
             audio: {
-              sampleRate: 48000,
+              sampleRate: browserInfo.isSafari ? 44100 : 48000, // Safari prefers 44.1kHz
               channelCount: 2,
               echoCancellation: audioSettings.echoCancellation,
               noiseSuppression: audioSettings.noiseSuppression,
@@ -794,8 +855,8 @@ export default function RecorderUI() {
         }
       }
 
-      // Get desktop audio stream
-      if (captureMode === "desktop" || captureMode === "both") {
+      // Get desktop audio stream (not supported in Safari)
+      if ((captureMode === "desktop" || captureMode === "both") && !browserInfo.isSafari) {
         try {
           desktopStream = await startDesktopCapture()
           await setupDesktopRecognition(desktopStream)
@@ -808,7 +869,7 @@ export default function RecorderUI() {
             setCaptureMode("microphone")
             micStream = await navigator.mediaDevices.getUserMedia({
               audio: {
-                sampleRate: 48000,
+                sampleRate: browserInfo.isSafari ? 44100 : 48000,
                 channelCount: 2,
                 echoCancellation: audioSettings.echoCancellation,
                 noiseSuppression: audioSettings.noiseSuppression,
@@ -822,8 +883,13 @@ export default function RecorderUI() {
 
       // Set up mixed audio recording
       if (micStream || desktopStream) {
-        const audioContext = new (window.AudioContext || window.webkitAudioContext)({
-          sampleRate: 48000,
+        const AudioContextClass = getAudioContext()
+        if (!AudioContextClass) {
+          throw new Error("AudioContext not supported in this browser")
+        }
+
+        const audioContext = new AudioContextClass({
+          sampleRate: browserInfo.isSafari ? 44100 : 48000,
         })
         const destination = audioContext.createMediaStreamDestination()
 
@@ -845,8 +911,11 @@ export default function RecorderUI() {
 
         const mixedStream = destination.stream
 
-        // Set up MediaRecorder
-        const supportedFormats = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"]
+        // Set up MediaRecorder with Safari-compatible formats
+        const supportedFormats = browserInfo.isSafari
+          ? ["audio/mp4", "audio/webm", "audio/wav"]
+          : ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"]
+
         let selectedFormat = "audio/webm"
         for (const format of supportedFormats) {
           if (MediaRecorder.isTypeSupported(format)) {
@@ -857,7 +926,7 @@ export default function RecorderUI() {
 
         mediaRecorderRef.current = new MediaRecorder(mixedStream, {
           mimeType: selectedFormat,
-          audioBitsPerSecond: 192000,
+          audioBitsPerSecond: browserInfo.isSafari ? 128000 : 192000, // Lower bitrate for Safari
         })
 
         currentChunkDataRef.current = []
@@ -1084,12 +1153,25 @@ export default function RecorderUI() {
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-50 to-slate-200 dark:from-slate-900 dark:to-slate-800 p-4 sm:p-6 lg:p-8 transition-colors duration-300">
       <div className="mx-auto max-w-6xl space-y-6">
-        {/* Header */}
-        <div className="text-center space-y-2">
-          <h1 className="text-3xl sm:text-4xl font-bold text-slate-800 dark:text-slate-100">Sesame Recorder</h1>
-          <p className="text-slate-600 dark:text-slate-400">
-            Record, transcribe, and analyze your AI conversations with automatic 30-second chunking.
-          </p>
+        {/* Header with Theme Toggle */}
+        <div className="relative">
+          <div className="text-center space-y-2">
+            <h1 className="text-3xl sm:text-4xl font-bold text-slate-800 dark:text-slate-100">Sesame Recorder</h1>
+            <p className="text-slate-600 dark:text-slate-400">
+              Record, transcribe, and analyze your AI conversations with automatic 30-second chunking.
+            </p>
+            {browserInfo.isSafari && (
+              <div className="flex items-center justify-center space-x-2 text-sm text-orange-600 dark:text-orange-400">
+                <Info className="h-4 w-4" />
+                <span>Safari detected - Desktop audio capture not supported, microphone recording available</span>
+              </div>
+            )}
+          </div>
+
+          {/* Theme Toggle - Positioned absolutely in top right */}
+          <div className="absolute top-0 right-0">
+            <ThemeToggle />
+          </div>
         </div>
 
         {error && (
@@ -1154,6 +1236,8 @@ export default function RecorderUI() {
                         size="sm"
                         onClick={() => setCaptureMode("desktop")}
                         className="text-xs"
+                        disabled={browserInfo.isSafari}
+                        title={browserInfo.isSafari ? "Desktop capture not supported in Safari" : ""}
                       >
                         <Headphones className="h-3 w-3 mr-1" />
                         Desktop
@@ -1163,11 +1247,24 @@ export default function RecorderUI() {
                         size="sm"
                         onClick={() => setCaptureMode("both")}
                         className="text-xs"
+                        disabled={browserInfo.isSafari}
+                        title={browserInfo.isSafari ? "Desktop capture not supported in Safari" : ""}
                       >
                         Both
                       </Button>
                     </div>
                   </div>
+
+                  {/* Safari Desktop Warning */}
+                  {browserInfo.isSafari && (captureMode === "desktop" || captureMode === "both") && (
+                    <Alert>
+                      <Info className="h-4 w-4" />
+                      <AlertDescription>
+                        🍎 Safari doesn't support desktop audio capture. Please use microphone mode or switch to
+                        Chrome/Firefox for desktop recording.
+                      </AlertDescription>
+                    </Alert>
+                  )}
 
                   {/* Reset Session Button */}
                   {(audioChunks.length > 0 || transcript.length > 0 || finalTranscripts.length > 0) && !isRecording && (
@@ -1331,6 +1428,11 @@ export default function RecorderUI() {
                           <p className="text-xs mt-2">
                             Audio will be automatically processed in {CHUNK_DURATION}-second chunks
                           </p>
+                          {browserInfo.isSafari && (
+                            <p className="text-xs mt-2 text-orange-600 dark:text-orange-400">
+                              🍎 Safari: Microphone recording supported, desktop capture requires Chrome/Firefox
+                            </p>
+                          )}
                         </div>
                       )}
                     </div>
@@ -1370,6 +1472,18 @@ export default function RecorderUI() {
                   </Button>
 
                   <div className="pt-4 space-y-2 text-sm text-slate-600 dark:text-slate-300">
+                    <div className="flex justify-between">
+                      <span>Browser:</span>
+                      <span className="font-mono text-xs">
+                        {browserInfo.isSafari
+                          ? "🍎 Safari"
+                          : browserInfo.isChrome
+                            ? "🌐 Chrome"
+                            : browserInfo.isFirefox
+                              ? "🦊 Firefox"
+                              : "Other"}
+                      </span>
+                    </div>
                     <div className="flex justify-between">
                       <span>Total Duration:</span>
                       <span className="font-mono">{formatDuration(duration)}</span>

@@ -186,7 +186,7 @@ ${finalTranscriptText}`
   return (
     <div className="space-y-6">
       {/* Header */}
-      <Card className="border-0 shadow-lg bg-card/80 backdrop-blur-sm">
+      <Card className="border-0 shadow-lg bg-card/80 backdrop-blur-sm transition-colors duration-300">
         <CardHeader>
           <CardTitle className="flex items-center justify-between">
             <div className="flex items-center space-x-2">
@@ -213,10 +213,10 @@ ${finalTranscriptText}`
 
       {/* Sessions List */}
       {sessions.length === 0 ? (
-        <Card className="border-0 shadow-lg bg-card/80 backdrop-blur-sm">
+        <Card className="border-0 shadow-lg bg-card/80 backdrop-blur-sm transition-colors duration-300">
           <CardContent className="py-12">
             <div className="text-center text-slate-400 dark:text-slate-500">
-              <FileText className="h-12 w-12 mx-auto mb-4 opacity-50" />
+              <FileText className="h-12 w-12 mx-auto mb-4 opacity-50 transition-colors duration-300" />
               <p className="text-lg font-medium mb-2">No recording sessions yet</p>
               <p className="text-sm">Start recording to see your session history here</p>
             </div>
@@ -228,7 +228,10 @@ ${finalTranscriptText}`
             const isExpanded = expandedSessions.has(session.id)
 
             return (
-              <Card key={session.id} className="border-0 shadow-lg bg-card/80 backdrop-blur-sm">
+              <Card
+                key={session.id}
+                className="border-0 shadow-lg bg-card/80 backdrop-blur-sm transition-colors duration-300"
+              >
                 <CardContent className="p-4">
                   {/* Session Header */}
                   <div className="flex items-center justify-between mb-3">

@@ -84,7 +84,7 @@ export function GeminiSettings({ onApiKeysChange }: GeminiSettingsProps) {
   const validApiKeysCount = apiKeys.filter((entry) => entry.key.trim().length > 0).length
 
   return (
-    <Card className="border-0 shadow-lg bg-card/80 backdrop-blur-sm">
+    <Card className="border-0 shadow-lg bg-card/80 backdrop-blur-sm transition-colors duration-300">
       <CardHeader>
         <CardTitle className="flex items-center space-x-2">
           <Sparkles className="h-5 w-5 text-purple-500" />
