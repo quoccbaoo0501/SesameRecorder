@@ -10,7 +10,6 @@ const inter = Inter({ subsets: ["latin"] })
 export const metadata: Metadata = {
   title: "Sesame Recorder - AI Conversation Recorder",
   description: "Record, transcribe, and analyze your AI conversations with Web Speech API",
-    generator: 'v0.dev'
 }
 
 export default function RootLayout({

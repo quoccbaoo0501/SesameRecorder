@@ -19,8 +19,7 @@ import {
   Monitor,
   Headphones,
   User,
-  Settings,
-  HelpCircle,
+  RotateCcw,
 } from "lucide-react"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import type { AudioSettings as AudioSettingsType } from "@/components/audio-settings"
@@ -28,6 +27,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { FinalTranscript } from "@/components/final-transcript"
 import { AudioSettings } from "@/components/audio-settings"
 import { GeminiSettings } from "@/components/gemini-settings"
+import { RecordingHistory } from "@/components/recording-history"
 
 // Add this import after other imports
 declare global {
@@ -45,23 +45,41 @@ interface TranscriptEntry {
   confidence?: number
 }
 
+interface AudioChunk {
+  blob: Blob
+  timestamp: string
+  duration: number
+  chunkNumber: number
+}
+
 interface SessionData {
   liveTranscript: TranscriptEntry[]
-  finalTranscript: string
-  duration: number
+  finalTranscripts: string[]
+  audioChunks: AudioChunk[]
+  totalDuration: number
   captureMode: string
   userName: string
   timestamp: string
-  // Remove finalAudioBlob from localStorage to save space
+}
+
+interface SessionEntry {
+  id: string
+  sessionDate: string
+  sessionTime: string
+  userName: string
+  captureMode: string
+  totalDuration: number
+  totalChunks: number
+  liveTranscript: TranscriptEntry[]
+  finalTranscripts: string[]
+  audioChunks: AudioChunk[]
+  totalWords: number
 }
 
 // Web Speech API Configuration
 const SpeechRecognition = typeof window !== "undefined" && (window.SpeechRecognition || window.webkitSpeechRecognition)
-const SpeechGrammarList = typeof window !== "undefined" && (window.SpeechGrammarList || window.webkitSpeechGrammarList)
 
-// Add this function after the imports and before the main component
 const showToast = (message: string, type: "success" | "error" | "loading" = "success") => {
-  // Simple notification system
   const notification = document.createElement("div")
   notification.className = `fixed top-4 right-4 z-50 p-4 rounded-lg shadow-lg text-white transition-all duration-300 ${
     type === "success" ? "bg-green-500" : type === "error" ? "bg-red-500" : "bg-blue-500"
@@ -77,75 +95,30 @@ const showToast = (message: string, type: "success" | "error" | "loading" = "suc
   }, 3000)
 }
 
-// Add this function after the interface definitions and before the main component
-const checkMediaRecorderSupport = () => {
-  if (!MediaRecorder) {
-    throw new Error("MediaRecorder is not supported in this browser")
-  }
+const CHUNK_DURATION = 30 // 30 seconds per chunk
 
-  const supportedTypes = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4", "audio/ogg;codecs=opus", "audio/wav"]
-
-  const supported = supportedTypes.find((type) => MediaRecorder.isTypeSupported(type))
-  if (!supported) {
-    throw new Error("No supported audio formats found for MediaRecorder")
-  }
-
-  return supported
-}
-
-// Helper functions for localStorage with size optimization
+// Helper functions for localStorage
 const saveSessionData = (data: SessionData) => {
   try {
-    // Calculate size before saving
-    const dataString = JSON.stringify(data)
-    const sizeKB = new Blob([dataString]).size / 1024
-
-    console.log(`💾 Saving session data: ${sizeKB.toFixed(1)}KB`)
-
-    // Check if data is too large for localStorage (5MB limit)
-    if (sizeKB > 4000) {
-      console.warn("⚠️ Session data too large, truncating...")
-      // Keep only essential data
-      const truncatedData = {
-        liveTranscript: data.liveTranscript.slice(-50), // Keep last 50 entries
-        finalTranscript: data.finalTranscript.slice(0, 10000), // Keep first 10k chars
-        duration: data.duration,
-        captureMode: data.captureMode,
-        userName: data.userName,
-        timestamp: data.timestamp,
-      }
-      localStorage.setItem("current-session", JSON.stringify(truncatedData))
-      showToast("⚠️ Session data truncated due to size limit", "loading")
-    } else {
-      localStorage.setItem("current-session", JSON.stringify(data))
+    // Don't save audio blobs to localStorage - too large
+    const dataToSave = {
+      ...data,
+      audioChunks: data.audioChunks.map((chunk) => ({
+        timestamp: chunk.timestamp,
+        duration: chunk.duration,
+        chunkNumber: chunk.chunkNumber,
+        // Don't save blob
+      })),
     }
 
+    localStorage.setItem("current-session", JSON.stringify(dataToSave))
     console.log("💾 Session data saved to localStorage")
   } catch (error) {
     console.error("Failed to save session data:", error)
-    if (error.name === "QuotaExceededError") {
-      // Clear old data and try again with minimal data
-      try {
-        localStorage.removeItem("current-session")
-        const minimalData = {
-          liveTranscript: data.liveTranscript.slice(-20),
-          finalTranscript: data.finalTranscript.slice(0, 5000),
-          duration: data.duration,
-          captureMode: data.captureMode,
-          userName: data.userName,
-          timestamp: data.timestamp,
-        }
-        localStorage.setItem("current-session", JSON.stringify(minimalData))
-        showToast("💾 Session saved with reduced data", "success")
-      } catch (retryError) {
-        console.error("Failed to save even minimal session data:", retryError)
-        showToast("❌ Failed to save session - storage full", "error")
-      }
-    }
   }
 }
 
-const loadSessionData = (): SessionData | null => {
+const loadSessionData = (): Partial<SessionData> | null => {
   try {
     const saved = localStorage.getItem("current-session")
     if (saved) {
@@ -168,38 +141,233 @@ const clearSessionData = () => {
   }
 }
 
+// Save current session to history
+const saveSessionToHistory = (sessionData: SessionData) => {
+  try {
+    // Only save if there's meaningful data
+    if (
+      sessionData.liveTranscript.length === 0 &&
+      sessionData.finalTranscripts.length === 0 &&
+      sessionData.totalDuration === 0
+    ) {
+      return
+    }
+
+    const existingHistory = localStorage.getItem("sesame-session-history")
+    const history: SessionEntry[] = existingHistory ? JSON.parse(existingHistory) : []
+
+    const now = new Date()
+    const sessionEntry: SessionEntry = {
+      id: `session-${now.getTime()}`,
+      sessionDate: now.toLocaleDateString(),
+      sessionTime: now.toLocaleTimeString(),
+      userName: sessionData.userName,
+      captureMode: sessionData.captureMode,
+      totalDuration: sessionData.totalDuration,
+      totalChunks: sessionData.audioChunks.length,
+      liveTranscript: sessionData.liveTranscript,
+      finalTranscripts: sessionData.finalTranscripts,
+      audioChunks: sessionData.audioChunks.map((chunk) => ({
+        timestamp: chunk.timestamp,
+        duration: chunk.duration,
+        chunkNumber: chunk.chunkNumber,
+        // Don't save blob to history
+      })),
+      totalWords: sessionData.finalTranscripts
+        .filter((t) => t)
+        .reduce((acc, transcript) => acc + transcript.split(" ").length, 0),
+    }
+
+    // Add to beginning of history (most recent first)
+    history.unshift(sessionEntry)
+
+    // Keep only last 50 sessions to prevent localStorage bloat
+    const trimmedHistory = history.slice(0, 50)
+
+    localStorage.setItem("sesame-session-history", JSON.stringify(trimmedHistory))
+    console.log("📚 Session saved to history")
+  } catch (error) {
+    console.error("Failed to save session to history:", error)
+  }
+}
+
+// Convert WebM to MP3 for download
+const convertToMp3 = async (audioBlob: Blob): Promise<Blob> => {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = async () => {
+      try {
+        const arrayBuffer = reader.result as ArrayBuffer
+        const audioContext = new (window.AudioContext || window.webkitAudioContext)({
+          sampleRate: 48000,
+        })
+        const audioBuffer = await audioContext.decodeAudioData(arrayBuffer)
+
+        const numberOfChannels = audioBuffer.numberOfChannels
+        const leftChannel = audioBuffer.getChannelData(0)
+        const rightChannel = numberOfChannels > 1 ? audioBuffer.getChannelData(1) : leftChannel
+
+        const leftPCM = new Int16Array(leftChannel.length)
+        const rightPCM = new Int16Array(rightChannel.length)
+
+        for (let i = 0; i < leftChannel.length; i++) {
+          leftPCM[i] = Math.max(-32768, Math.min(32767, leftChannel[i] * 32767))
+          rightPCM[i] = Math.max(-32768, Math.min(32767, rightChannel[i] * 32767))
+        }
+
+        const mp3encoder = new (window as any).lamejs.Mp3Encoder(
+          numberOfChannels,
+          audioBuffer.sampleRate,
+          256, // High quality for download
+        )
+
+        const mp3Data = []
+        const sampleBlockSize = 1152
+
+        for (let i = 0; i < leftPCM.length; i += sampleBlockSize) {
+          const leftChunk = leftPCM.subarray(i, i + sampleBlockSize)
+          const rightChunk = rightPCM.subarray(i, i + sampleBlockSize)
+          const mp3buf = mp3encoder.encodeBuffer(leftChunk, rightChunk)
+          if (mp3buf.length > 0) {
+            mp3Data.push(mp3buf)
+          }
+        }
+
+        const mp3buf = mp3encoder.flush()
+        if (mp3buf.length > 0) {
+          mp3Data.push(mp3buf)
+        }
+
+        const mp3Blob = new Blob(mp3Data, { type: "audio/mpeg" })
+        resolve(mp3Blob)
+      } catch (error) {
+        reject(error)
+      }
+    }
+    reader.onerror = reject
+    reader.readAsArrayBuffer(audioBlob)
+  })
+}
+
+// Merge multiple audio blobs into one
+const mergeAudioBlobs = async (audioChunks: AudioChunk[]): Promise<Blob> => {
+  if (audioChunks.length === 0) {
+    throw new Error("No audio chunks to merge")
+  }
+
+  if (audioChunks.length === 1) {
+    return audioChunks[0].blob
+  }
+
+  // Create audio context for merging
+  const audioContext = new (window.AudioContext || window.webkitAudioContext)({
+    sampleRate: 48000,
+  })
+
+  const audioBuffers: AudioBuffer[] = []
+
+  // Decode all audio chunks
+  for (const chunk of audioChunks) {
+    const arrayBuffer = await chunk.blob.arrayBuffer()
+    const audioBuffer = await audioContext.decodeAudioData(arrayBuffer)
+    audioBuffers.push(audioBuffer)
+  }
+
+  // Calculate total length
+  const totalLength = audioBuffers.reduce((acc, buffer) => acc + buffer.length, 0)
+  const numberOfChannels = audioBuffers[0].numberOfChannels
+  const sampleRate = audioBuffers[0].sampleRate
+
+  // Create merged buffer
+  const mergedBuffer = audioContext.createBuffer(numberOfChannels, totalLength, sampleRate)
+
+  let offset = 0
+  for (const buffer of audioBuffers) {
+    for (let channel = 0; channel < numberOfChannels; channel++) {
+      const channelData = mergedBuffer.getChannelData(channel)
+      const sourceData = buffer.getChannelData(channel)
+      channelData.set(sourceData, offset)
+    }
+    offset += buffer.length
+  }
+
+  // Convert to MP3
+  const leftChannel = mergedBuffer.getChannelData(0)
+  const rightChannel = numberOfChannels > 1 ? mergedBuffer.getChannelData(1) : leftChannel
+
+  const leftPCM = new Int16Array(leftChannel.length)
+  const rightPCM = new Int16Array(rightChannel.length)
+
+  for (let i = 0; i < leftChannel.length; i++) {
+    leftPCM[i] = Math.max(-32768, Math.min(32767, leftChannel[i] * 32767))
+    rightPCM[i] = Math.max(-32768, Math.min(32767, rightChannel[i] * 32767))
+  }
+
+  const mp3encoder = new (window as any).lamejs.Mp3Encoder(numberOfChannels, sampleRate, 256)
+  const mp3Data = []
+  const sampleBlockSize = 1152
+
+  for (let i = 0; i < leftPCM.length; i += sampleBlockSize) {
+    const leftChunk = leftPCM.subarray(i, i + sampleBlockSize)
+    const rightChunk = rightPCM.subarray(i, i + sampleBlockSize)
+    const mp3buf = mp3encoder.encodeBuffer(leftChunk, rightChunk)
+    if (mp3buf.length > 0) {
+      mp3Data.push(mp3buf)
+    }
+  }
+
+  const mp3buf = mp3encoder.flush()
+  if (mp3buf.length > 0) {
+    mp3Data.push(mp3buf)
+  }
+
+  await audioContext.close()
+  return new Blob(mp3Data, { type: "audio/mpeg" })
+}
+
+// Format live transcript for context
+const formatLiveTranscriptForContext = (transcript: TranscriptEntry[], userName: string): string => {
+  if (transcript.length === 0) return ""
+
+  return transcript
+    .map((entry) => `${entry.speaker === "user" ? userName || "User" : "AI Assistant"}: ${entry.text}`)
+    .join("\n")
+}
+
 export default function RecorderUI() {
   const [isRecording, setIsRecording] = useState(false)
   const [duration, setDuration] = useState(0)
+  const [chunkDuration, setChunkDuration] = useState(0) // Duration of current chunk
+  const [currentChunkNumber, setCurrentChunkNumber] = useState(1)
   const [transcript, setTranscript] = useState<TranscriptEntry[]>([])
   const [currentTranscript, setCurrentTranscript] = useState("")
   const [audioLevel, setAudioLevel] = useState(0)
   const [error, setError] = useState<string | null>(null)
   const [isClient, setIsClient] = useState(false)
-  const [finalTranscript, setFinalTranscript] = useState("")
-  const [finalAudioBlob, setFinalAudioBlob] = useState<Blob | null>(null)
+  const [finalTranscripts, setFinalTranscripts] = useState<string[]>([])
+  const [audioChunks, setAudioChunks] = useState<AudioChunk[]>([])
   const [userName, setUserName] = useState("")
+  const [geminiApiKeys, setGeminiApiKeys] = useState<string[]>([])
 
   const [captureMode, setCaptureMode] = useState<"microphone" | "desktop" | "both">("microphone")
   const [isListeningForAI, setIsListeningForAI] = useState(false)
   const [speechRecognitionActive, setSpeechRecognitionActive] = useState(false)
-  const [geminiApiKey, setGeminiApiKey] = useState("")
 
-  const scrollAreaRef = useRef<HTMLDivElement>(null)
+  // Refs
   const intervalRef = useRef<NodeJS.Timeout>()
+  const chunkIntervalRef = useRef<NodeJS.Timeout>()
   const audioContextRef = useRef<AudioContext | null>(null)
   const analyserRef = useRef<AnalyserNode | null>()
   const dataArrayRef = useRef<Uint8Array | null>(null)
   const animationFrameRef = useRef<number>()
   const mediaRecorderRef = useRef<MediaRecorder | null>(null)
-  const audioChunksRef = useRef<Blob[]>([])
+  const currentChunkDataRef = useRef<Blob[]>([])
   const recognitionRef = useRef<any | null>(null)
+  const isRecordingRef = useRef(false) // Add this to track recording state
 
   // Stream refs
   const micStreamRef = useRef<MediaStream | null>(null)
   const desktopStreamRef = useRef<MediaStream | null>(null)
-  const micProcessorRef = useRef<ScriptProcessorNode | null>(null)
-  const desktopProcessorRef = useRef<ScriptProcessorNode | null>(null)
 
   const [audioSettings, setAudioSettings] = useState<AudioSettingsType>({
     sampleRate: 44100,
@@ -218,12 +386,29 @@ export default function RecorderUI() {
       setUserName(savedUserName)
     }
 
+    // Load API keys from localStorage
+    const loadApiKeys = () => {
+      try {
+        const saved = localStorage.getItem("gemini-api-keys")
+        if (saved) {
+          const parsed = JSON.parse(saved)
+          if (Array.isArray(parsed)) {
+            setGeminiApiKeys(parsed.filter((key) => key && key.trim().length > 0))
+          }
+        }
+      } catch (error) {
+        console.error("Failed to load API keys:", error)
+      }
+    }
+
+    loadApiKeys()
+
     // Load previous session data
     const sessionData = loadSessionData()
     if (sessionData) {
       setTranscript(sessionData.liveTranscript || [])
-      setFinalTranscript(sessionData.finalTranscript || "")
-      setDuration(sessionData.duration || 0)
+      setFinalTranscripts(sessionData.finalTranscripts || [])
+      setDuration(sessionData.totalDuration || 0)
       setCaptureMode((sessionData.captureMode as any) || "microphone")
 
       showToast("📂 Previous session restored!", "success")
@@ -236,13 +421,14 @@ export default function RecorderUI() {
     localStorage.setItem("user-name", value)
   }
 
-  // Save session data whenever important state changes (without audio blob)
+  // Save session data whenever important state changes
   useEffect(() => {
-    if (transcript.length > 0 || finalTranscript) {
+    if (transcript.length > 0 || finalTranscripts.length > 0 || audioChunks.length > 0) {
       const sessionData: SessionData = {
         liveTranscript: transcript,
-        finalTranscript,
-        duration,
+        finalTranscripts,
+        audioChunks,
+        totalDuration: duration,
         captureMode,
         userName,
         timestamp: new Date().toISOString(),
@@ -250,7 +436,7 @@ export default function RecorderUI() {
 
       saveSessionData(sessionData)
     }
-  }, [transcript, finalTranscript, duration, captureMode, userName])
+  }, [transcript, finalTranscripts, audioChunks, duration, captureMode, userName])
 
   // Fix hydration mismatch
   useEffect(() => {
@@ -266,16 +452,6 @@ export default function RecorderUI() {
   const cleanupAudioProcessing = useCallback(() => {
     if (animationFrameRef.current) {
       cancelAnimationFrame(animationFrameRef.current)
-    }
-
-    // Cleanup processors
-    if (micProcessorRef.current) {
-      micProcessorRef.current.disconnect()
-      micProcessorRef.current = null
-    }
-    if (desktopProcessorRef.current) {
-      desktopProcessorRef.current.disconnect()
-      desktopProcessorRef.current = null
     }
 
     if (audioContextRef.current && audioContextRef.current.state !== "closed") {
@@ -339,7 +515,7 @@ export default function RecorderUI() {
     [visualizeAudio],
   )
 
-  // Improved speech recognition setup for persistent transcript
+  // Setup speech recognition
   const setupSpeechRecognition = useCallback((onResult: (text: string, isFinal: boolean) => void, language: string) => {
     if (!SpeechRecognition) {
       throw new Error("Speech Recognition is not supported in this browser")
@@ -347,18 +523,16 @@ export default function RecorderUI() {
 
     const recognition = new SpeechRecognition()
     recognition.continuous = true
-    recognition.interimResults = true // Keep interim results for live feedback
+    recognition.interimResults = true
     recognition.lang = language
     recognition.maxAlternatives = 1
 
-    let finalTranscriptSoFar = ""
     let lastFinalIndex = 0
 
     recognition.onresult = (event) => {
       let interimTranscript = ""
       let finalTranscript = ""
 
-      // Process all results
       for (let i = lastFinalIndex; i < event.results.length; i++) {
         const result = event.results[i]
         const transcript = result[0].transcript
@@ -371,13 +545,10 @@ export default function RecorderUI() {
         }
       }
 
-      // If we have final transcript, add it permanently
       if (finalTranscript) {
-        finalTranscriptSoFar += finalTranscript
         onResult(finalTranscript.trim(), true)
       }
 
-      // Show interim results
       if (interimTranscript) {
         onResult(interimTranscript.trim(), false)
       }
@@ -386,9 +557,8 @@ export default function RecorderUI() {
     recognition.onerror = (event) => {
       console.error("Speech recognition error:", event.error)
       if (event.error === "no-speech") {
-        // Restart recognition on no-speech
         setTimeout(() => {
-          if (recognitionRef.current === recognition) {
+          if (recognitionRef.current === recognition && isRecordingRef.current) {
             try {
               recognition.start()
             } catch (e) {
@@ -400,9 +570,7 @@ export default function RecorderUI() {
     }
 
     recognition.onend = () => {
-      console.log("Speech recognition ended, attempting restart...")
-      // Auto-restart recognition if still recording
-      if (recognitionRef.current === recognition) {
+      if (recognitionRef.current === recognition && isRecordingRef.current) {
         setTimeout(() => {
           try {
             recognition.start()
@@ -416,7 +584,7 @@ export default function RecorderUI() {
     return recognition
   }, [])
 
-  // Setup microphone recognition with persistent transcript
+  // Setup microphone recognition
   const setupMicRecognition = useCallback(
     async (micStream: MediaStream) => {
       try {
@@ -437,9 +605,9 @@ export default function RecorderUI() {
               confidence: 0.9,
             }
             setTranscript((prev) => [...prev, newEntry])
-            setCurrentTranscript("") // Clear interim
+            setCurrentTranscript("")
           } else if (!isFinal && text.length > 0) {
-            setCurrentTranscript(text) // Show interim
+            setCurrentTranscript(text)
           }
         }
 
@@ -448,19 +616,15 @@ export default function RecorderUI() {
         recognition.start()
 
         setSpeechRecognitionActive(true)
-        showToast("Speech recognition started for microphone", "success")
-
-        // Setup audio visualization
         setupAudioProcessing(micStream)
       } catch (error) {
         console.error("Failed to setup speech recognition for microphone:", error)
-        showToast("Failed to setup speech recognition for microphone", "error")
       }
     },
     [setupSpeechRecognition, audioSettings.language, setupAudioProcessing],
   )
 
-  // Setup desktop recognition with AI detection
+  // Setup desktop recognition
   const setupDesktopRecognition = useCallback(
     async (desktopStream: MediaStream) => {
       try {
@@ -469,7 +633,6 @@ export default function RecorderUI() {
         const handleSpeechResult = (partialText: string, isFinal: boolean) => {
           const text = partialText.trim()
           if (isFinal && text.length > 10) {
-            // AI pattern detection
             const aiPatterns = [
               /^(I|Here|Let me|Based on|According to|The answer is|Sure|Of course|Certainly)/i,
               /\b(help|assist|explain|understand|provide|suggest|recommend)\b/i,
@@ -484,7 +647,7 @@ export default function RecorderUI() {
                 timestamp: new Date().toLocaleTimeString([], {
                   hour: "2-digit",
                   minute: "2-digit",
-                  second: "2-digit",
+                  second: "second",
                 }),
                 speaker: "ai",
                 text: text,
@@ -498,13 +661,10 @@ export default function RecorderUI() {
         }
 
         const desktopRecognition = setupSpeechRecognition(handleSpeechResult, audioSettings.language)
-
         desktopRecognition.start()
         setIsListeningForAI(true)
-        showToast("Speech recognition started for desktop audio", "success")
       } catch (error) {
         console.error("Failed to setup speech recognition for desktop:", error)
-        showToast("Failed to setup speech recognition for desktop audio", "error")
       }
     },
     [setupSpeechRecognition, audioSettings.language],
@@ -512,14 +672,13 @@ export default function RecorderUI() {
 
   const startDesktopCapture = async () => {
     try {
-      // Improved desktop capture with better error handling
       const stream = await navigator.mediaDevices.getDisplayMedia({
         audio: {
           echoCancellation: false,
           noiseSuppression: false,
           autoGainControl: false,
-          sampleRate: 48000, // Higher sample rate for better quality
-          channelCount: 2, // Stereo
+          sampleRate: 48000,
+          channelCount: 2,
         },
         video: {
           mediaSource: "screen",
@@ -530,36 +689,81 @@ export default function RecorderUI() {
 
       const audioTracks = stream.getAudioTracks()
       if (audioTracks.length === 0) {
-        throw new Error("❌ Không có audio track. Hãy chắc chắn bạn đã chọn 'Share audio' khi được hỏi!")
+        throw new Error("❌ No audio track. Make sure to select 'Share audio' when prompted!")
       }
 
-      console.log(
-        "✅ Desktop audio tracks:",
-        audioTracks.map((t) => t.label),
-      )
-      showToast("✅ Desktop audio capture thành công!", "success")
       return stream
     } catch (error) {
-      console.error("Desktop audio capture error:", error)
-
       if (error.name === "NotAllowedError") {
-        throw new Error(
-          "🚫 Quyền truy cập bị từ chối! Vui lòng:\n1. Reload trang\n2. Chọn tab có AI (ChatGPT, Claude...)\n3. ✅ Tick vào 'Share audio'\n4. Click 'Share'",
-        )
+        throw new Error("🚫 Permission denied! Please reload and select 'Share audio'")
       } else if (error.name === "NotFoundError") {
-        throw new Error("❌ Không tìm thấy audio source. Hãy chọn tab có âm thanh.")
+        throw new Error("❌ No audio source found. Select a tab with audio.")
       } else {
-        throw new Error(`❌ Lỗi capture desktop audio: ${error.message}`)
+        throw new Error(`❌ Desktop audio capture error: ${error.message}`)
       }
     }
   }
 
+  // Save current chunk and start new one
+  const saveCurrentChunk = useCallback(() => {
+    if (currentChunkDataRef.current.length > 0 && mediaRecorderRef.current) {
+      const chunkBlob = new Blob(currentChunkDataRef.current, {
+        type: mediaRecorderRef.current.mimeType || "audio/webm",
+      })
+
+      const newChunk: AudioChunk = {
+        blob: chunkBlob,
+        timestamp: new Date().toLocaleTimeString(),
+        duration: CHUNK_DURATION,
+        chunkNumber: currentChunkNumber,
+      }
+
+      setAudioChunks((prev) => [...prev, newChunk])
+      currentChunkDataRef.current = []
+      setChunkDuration(0)
+      setCurrentChunkNumber((prev) => prev + 1)
+
+      showToast(`📦 Chunk ${currentChunkNumber} saved (${CHUNK_DURATION}s)`, "success")
+    }
+  }, [currentChunkNumber])
+
+  // Restart recording for next chunk
+  const restartRecordingForNextChunk = useCallback(() => {
+    if (isRecordingRef.current && mediaRecorderRef.current) {
+      console.log(`🔄 Restarting recording for chunk ${currentChunkNumber + 1}`)
+
+      // Start new recording immediately
+      try {
+        mediaRecorderRef.current.start(1000)
+        console.log(`✅ Started recording chunk ${currentChunkNumber + 1}`)
+      } catch (error) {
+        console.error("Failed to restart recording:", error)
+        showToast("❌ Failed to restart recording", "error")
+      }
+    }
+  }, [currentChunkNumber])
+
   const startRecording = async () => {
     setError(null)
-    // Clear previous session when starting new recording
+
+    // Save current session to history before starting new one
+    const currentSessionData = loadSessionData()
+    if (currentSessionData) {
+      const sessionData: SessionData = {
+        liveTranscript: transcript,
+        finalTranscripts,
+        audioChunks,
+        totalDuration: duration,
+        captureMode,
+        userName,
+        timestamp: new Date().toISOString(),
+      }
+      saveSessionToHistory(sessionData)
+      showToast("📚 Previous session saved to history", "success")
+    }
+
+    // Clear current session
     clearSessionData()
-    setFinalAudioBlob(null)
-    setFinalTranscript("")
 
     try {
       let micStream: MediaStream | null = null
@@ -570,19 +774,18 @@ export default function RecorderUI() {
         try {
           micStream = await navigator.mediaDevices.getUserMedia({
             audio: {
-              sampleRate: 48000, // Higher sample rate
-              channelCount: 2, // Stereo
+              sampleRate: 48000,
+              channelCount: 2,
               echoCancellation: audioSettings.echoCancellation,
               noiseSuppression: audioSettings.noiseSuppression,
               autoGainControl: audioSettings.autoGain,
             },
           })
-          setupAudioProcessing(micStream)
           await setupMicRecognition(micStream)
           showToast("✅ Microphone access granted", "success")
         } catch (err) {
           console.error("Microphone access error:", err)
-          showToast("❌ Không thể truy cập microphone. Kiểm tra quyền.", "error")
+          showToast("❌ Cannot access microphone", "error")
           if (captureMode === "both") {
             setCaptureMode("desktop")
           } else {
@@ -612,16 +815,15 @@ export default function RecorderUI() {
                 autoGainControl: audioSettings.autoGain,
               },
             })
-            setupAudioProcessing(micStream)
             await setupMicRecognition(micStream)
           }
         }
       }
 
-      // Set up mixed audio recording for download - IMPROVED FORMAT
+      // Set up mixed audio recording
       if (micStream || desktopStream) {
         const audioContext = new (window.AudioContext || window.webkitAudioContext)({
-          sampleRate: 48000, // Higher sample rate
+          sampleRate: 48000,
         })
         const destination = audioContext.createMediaStreamDestination()
 
@@ -643,15 +845,8 @@ export default function RecorderUI() {
 
         const mixedStream = destination.stream
 
-        // Try different formats for better compatibility with AssemblyAI
-        const supportedFormats = [
-          "audio/webm;codecs=pcm", // PCM is best for AssemblyAI
-          "audio/wav", // WAV is also good
-          "audio/webm;codecs=opus",
-          "audio/webm",
-          "audio/mp4",
-        ]
-
+        // Set up MediaRecorder
+        const supportedFormats = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"]
         let selectedFormat = "audio/webm"
         for (const format of supportedFormats) {
           if (MediaRecorder.isTypeSupported(format)) {
@@ -660,25 +855,33 @@ export default function RecorderUI() {
           }
         }
 
-        console.log(`🎵 Selected audio format: ${selectedFormat}`)
-
         mediaRecorderRef.current = new MediaRecorder(mixedStream, {
           mimeType: selectedFormat,
-          audioBitsPerSecond: 128000, // 128kbps
+          audioBitsPerSecond: 192000,
         })
 
-        audioChunksRef.current = []
+        currentChunkDataRef.current = []
 
         mediaRecorderRef.current.addEventListener("dataavailable", (event) => {
           if (event.data.size > 0) {
-            console.log(`📦 Audio chunk: ${event.data.size} bytes, type: ${event.data.type}`)
-            audioChunksRef.current.push(event.data)
+            currentChunkDataRef.current.push(event.data)
           }
         })
 
         mediaRecorderRef.current.addEventListener("stop", () => {
-          console.log("🛑 MediaRecorder stopped")
-          audioContext.close()
+          console.log(`🛑 MediaRecorder stopped for chunk ${currentChunkNumber}`)
+          // Save the current chunk
+          saveCurrentChunk()
+
+          // If still recording, restart for next chunk
+          if (isRecordingRef.current) {
+            setTimeout(() => {
+              restartRecordingForNextChunk()
+            }, 100)
+          } else {
+            // Final stop - close audio context
+            audioContext.close()
+          }
         })
 
         mediaRecorderRef.current.addEventListener("error", (event) => {
@@ -687,27 +890,49 @@ export default function RecorderUI() {
         })
 
         mediaRecorderRef.current.start(1000) // Record in 1-second chunks
-        showToast(`🎵 ${selectedFormat} audio recording started!`, "success")
+        console.log(`🎵 Started recording chunk ${currentChunkNumber}`)
       }
 
       setIsRecording(true)
+      isRecordingRef.current = true
       setDuration(0)
+      setChunkDuration(0)
+      setCurrentChunkNumber(1)
+
+      // Reset current session state
       setTranscript([])
+      setFinalTranscripts([])
+      setAudioChunks([])
       setCurrentTranscript("")
 
-      showToast(`🚀 Live transcription started with ${captureMode} capture!`, "success")
+      // Start chunk timer - automatically save chunks every 30 seconds
+      chunkIntervalRef.current = setInterval(() => {
+        if (isRecordingRef.current && mediaRecorderRef.current && mediaRecorderRef.current.state === "recording") {
+          console.log(`⏰ 30 seconds reached, stopping chunk ${currentChunkNumber}`)
+          // Stop current recording to trigger the save and restart cycle
+          mediaRecorderRef.current.stop()
+        }
+      }, CHUNK_DURATION * 1000)
+
+      showToast(`🚀 Recording started with ${captureMode} capture! Auto-chunking every ${CHUNK_DURATION}s`, "success")
     } catch (err) {
       console.error("Error starting recording:", err)
-      setError(
-        `❌ Failed to start recording: ${err.message}. Please try a different browser or check your audio settings.`,
-      )
+      setError(`❌ Failed to start recording: ${err.message}`)
       setIsRecording(false)
+      isRecordingRef.current = false
     }
   }
 
   const stopRecording = () => {
+    console.log("🛑 Stopping recording...")
+    isRecordingRef.current = false
+
     if (mediaRecorderRef.current && mediaRecorderRef.current.state === "recording") {
       mediaRecorderRef.current.stop()
+    }
+
+    if (chunkIntervalRef.current) {
+      clearInterval(chunkIntervalRef.current)
     }
 
     cleanupAudioProcessing()
@@ -716,39 +941,9 @@ export default function RecorderUI() {
     setIsListeningForAI(false)
     setSpeechRecognitionActive(false)
     setCurrentTranscript("")
-    showToast("🛑 Recording stopped. Starting audio analysis...", "success")
+    setChunkDuration(0)
 
-    // Create final audio blob and trigger analysis
-    if (audioChunksRef.current.length > 0) {
-      // Create blob with proper MIME type
-      const firstChunk = audioChunksRef.current[0]
-      const mimeType = firstChunk.type || "audio/webm"
-
-      const mixedBlob = new Blob(audioChunksRef.current, { type: mimeType })
-      console.log(`🎵 Created final audio blob: ${mixedBlob.size} bytes, type: ${mixedBlob.type}`)
-
-      setFinalAudioBlob(mixedBlob) // This will trigger the FinalTranscript component
-
-      try {
-        const recordingEntry = {
-          id: Date.now().toString(),
-          timestamp: new Date().toLocaleString(),
-          duration: duration,
-          transcriptLength: transcript.reduce((acc, entry) => acc + entry.text.length, 0),
-          audioSize: mixedBlob.size,
-          transcript: JSON.stringify(transcript),
-          captureMode: captureMode,
-          audioType: mimeType,
-        }
-
-        const savedRecordings = localStorage.getItem("sesame-recordings")
-        const recordings = savedRecordings ? JSON.parse(savedRecordings) : []
-        recordings.push(recordingEntry)
-        localStorage.setItem("sesame-recordings", JSON.stringify(recordings))
-      } catch (error) {
-        console.error("Failed to save recording to history:", error)
-      }
-    }
+    showToast("🛑 Recording stopped", "success")
   }
 
   const handleToggleRecording = () => {
@@ -759,21 +954,89 @@ export default function RecorderUI() {
     }
   }
 
-  // Clear session function for new recording
-  const handleNewRecording = () => {
-    clearSessionData()
+  // Reset session function
+  const handleResetSession = () => {
+    // Save current session to history before resetting
+    if (transcript.length > 0 || finalTranscripts.length > 0 || audioChunks.length > 0) {
+      const sessionData: SessionData = {
+        liveTranscript: transcript,
+        finalTranscripts,
+        audioChunks,
+        totalDuration: duration,
+        captureMode,
+        userName,
+        timestamp: new Date().toISOString(),
+      }
+      saveSessionToHistory(sessionData)
+      showToast("📚 Session saved to history before reset", "success")
+    }
+
+    setAudioChunks([])
+    setFinalTranscripts([])
     setTranscript([])
-    setFinalTranscript("")
-    setFinalAudioBlob(null)
-    setDuration(0)
     setCurrentTranscript("")
-    showToast("🗑️ Session cleared. Ready for new recording!", "success")
+    setDuration(0)
+    setChunkDuration(0)
+    setCurrentChunkNumber(1)
+    clearSessionData()
+    showToast("🗑️ Session reset!", "success")
   }
 
+  // Handle transcript completion from FinalTranscript component
+  const handleTranscriptComplete = (transcript: string, chunkIndex: number) => {
+    setFinalTranscripts((prev) => {
+      const newTranscripts = [...prev]
+      newTranscripts[chunkIndex] = transcript
+      return newTranscripts
+    })
+  }
+
+  // Download merged audio
+  const handleDownloadAudio = async () => {
+    if (audioChunks.length === 0) {
+      showToast("No audio recorded to download.", "error")
+      return
+    }
+
+    try {
+      showToast("Merging audio chunks...", "loading")
+      const mergedBlob = await mergeAudioBlobs(audioChunks)
+
+      const url = URL.createObjectURL(mergedBlob)
+      const a = document.createElement("a")
+      a.href = url
+      a.download = `complete-recording-${new Date().toISOString().replace(/[:.]/g, "-")}.mp3`
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      URL.revokeObjectURL(url)
+
+      showToast("Complete audio download started!", "success")
+    } catch (error) {
+      console.error("Failed to merge audio:", error)
+      showToast("Failed to merge audio chunks", "error")
+    }
+  }
+
+  const handleDownloadTranscript = () => {
+    const transcriptText = formatLiveTranscriptForContext(transcript, userName)
+    const blob = new Blob([transcriptText], { type: "text/plain" })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement("a")
+    a.href = url
+    a.download = `live-transcript-${new Date().toISOString().replace(/[:.]/g, "-")}.txt`
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    URL.revokeObjectURL(url)
+  }
+
+  // Timer effects
   useEffect(() => {
     if (isRecording) {
       intervalRef.current = setInterval(() => {
         setDuration((prev) => prev + 1)
+        setChunkDuration((prev) => prev + 1)
       }, 1000)
     } else {
       if (intervalRef.current) {
@@ -788,162 +1051,19 @@ export default function RecorderUI() {
     }
   }, [isRecording])
 
-  useEffect(() => {
-    if (scrollAreaRef.current) {
-      const scrollContainer = scrollAreaRef.current.querySelector("[data-radix-scroll-area-viewport]")
-      if (scrollContainer) {
-        scrollContainer.scrollTop = scrollContainer.scrollHeight
-      }
-    }
-  }, [transcript, currentTranscript])
-
+  // Cleanup on unmount
   useEffect(() => {
     return () => {
+      isRecordingRef.current = false
       if (mediaRecorderRef.current && mediaRecorderRef.current.state === "recording") {
         mediaRecorderRef.current.stop()
+      }
+      if (chunkIntervalRef.current) {
+        clearInterval(chunkIntervalRef.current)
       }
       cleanupAudioProcessing()
     }
   }, [cleanupAudioProcessing])
-
-  useEffect(() => {
-    if (isClient) {
-      try {
-        checkMediaRecorderSupport()
-      } catch (error) {
-        setError(`Browser compatibility issue: ${error.message}`)
-        showToast("Your browser may not fully support audio recording", "error")
-      }
-    }
-  }, [isClient])
-
-  const convertToMp3 = async (audioBlob: Blob): Promise<Blob> => {
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader()
-      reader.onload = async () => {
-        try {
-          const arrayBuffer = reader.result as ArrayBuffer
-          const audioContext = new (window.AudioContext || window.webkitAudioContext)()
-          const audioBuffer = await audioContext.decodeAudioData(arrayBuffer)
-
-          // Get audio data
-          const leftChannel = audioBuffer.getChannelData(0)
-          const rightChannel = audioBuffer.numberOfChannels > 1 ? audioBuffer.getChannelData(1) : leftChannel
-
-          // Convert to 16-bit PCM
-          const leftPCM = new Int16Array(leftChannel.length)
-          const rightPCM = new Int16Array(rightChannel.length)
-
-          for (let i = 0; i < leftChannel.length; i++) {
-            leftPCM[i] = Math.max(-32768, Math.min(32767, leftChannel[i] * 32768))
-            rightPCM[i] = Math.max(-32768, Math.min(32767, rightChannel[i] * 32768))
-          }
-
-          // Initialize MP3 encoder
-          const mp3encoder = new (window as any).lamejs.Mp3Encoder(
-            audioBuffer.numberOfChannels,
-            audioBuffer.sampleRate,
-            128, // bitrate
-          )
-
-          const mp3Data = []
-          const sampleBlockSize = 1152 // samples per frame
-
-          for (let i = 0; i < leftPCM.length; i += sampleBlockSize) {
-            const leftChunk = leftPCM.subarray(i, i + sampleBlockSize)
-            const rightChunk = rightPCM.subarray(i, i + sampleBlockSize)
-            const mp3buf = mp3encoder.encodeBuffer(leftChunk, rightChunk)
-            if (mp3buf.length > 0) {
-              mp3Data.push(mp3buf)
-            }
-          }
-
-          // Finalize encoding
-          const mp3buf = mp3encoder.flush()
-          if (mp3buf.length > 0) {
-            mp3Data.push(mp3buf)
-          }
-
-          const mp3Blob = new Blob(mp3Data, { type: "audio/mp3" })
-          resolve(mp3Blob)
-        } catch (error) {
-          reject(error)
-        }
-      }
-      reader.onerror = reject
-      reader.readAsArrayBuffer(audioBlob)
-    })
-  }
-
-  const handleDownloadAudio = async () => {
-    if (audioChunksRef.current.length === 0) {
-      showToast("No audio recorded to download.", "error")
-      return
-    }
-
-    try {
-      showToast("Converting to MP3...", "loading")
-
-      const audioBlob = new Blob(audioChunksRef.current, { type: "audio/webm" })
-      const mp3Blob = await convertToMp3(audioBlob)
-
-      const url = URL.createObjectURL(mp3Blob)
-      const a = document.createElement("a")
-      a.style.display = "none"
-      a.href = url
-      a.download = `recording-mixed-${new Date().toISOString().slice(0, 19).replace("T", "_").replace(/:/g, "-")}.mp3`
-      document.body.appendChild(a)
-      a.click()
-      window.URL.revokeObjectURL(url)
-      a.remove()
-
-      showToast("MP3 audio download started!", "success")
-    } catch (error) {
-      console.error("MP3 conversion failed:", error)
-      showToast("Failed to convert to MP3. Downloading as WebM instead.", "error")
-
-      // Fallback to WebM
-      const audioBlob = new Blob(audioChunksRef.current, { type: "audio/webm" })
-      const url = URL.createObjectURL(audioBlob)
-      const a = document.createElement("a")
-      a.style.display = "none"
-      a.href = url
-      a.download = `recording-mixed-${new Date().toISOString().slice(0, 19).replace("T", "_").replace(/:/g, "-")}.webm`
-      document.body.appendChild(a)
-      a.click()
-      window.URL.revokeObjectURL(url)
-      a.remove()
-
-      showToast("WebM audio download started!", "success")
-    }
-  }
-
-  const handleDownloadTranscript = () => {
-    if (transcript.length === 0) {
-      showToast("No transcript to download.", "error")
-      return
-    }
-    const transcriptText = transcript
-      .map(
-        (entry) =>
-          `[${entry.timestamp}] ${entry.speaker === "user" ? userName || "User" : "AI Assistant"} (${entry.source || "unknown"}${
-            entry.confidence ? ` - ${Math.round(entry.confidence * 100)}%` : ""
-          }): ${entry.text}`,
-      )
-      .join("\n\n")
-
-    const blob = new Blob([transcriptText], { type: "text/plain" })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement("a")
-    a.style.display = "none"
-    a.href = url
-    a.download = `live-transcript-${new Date().toISOString().slice(0, 19).replace("T", "_").replace(/:/g, "-")}.txt`
-    document.body.appendChild(a)
-    a.click()
-    URL.revokeObjectURL(url)
-    a.remove()
-    showToast("Live transcript download started.", "success")
-  }
 
   const isReady = !isRecording && duration === 0
 
@@ -968,7 +1088,7 @@ export default function RecorderUI() {
         <div className="text-center space-y-2">
           <h1 className="text-3xl sm:text-4xl font-bold text-slate-800 dark:text-slate-100">Sesame Recorder</h1>
           <p className="text-slate-600 dark:text-slate-400">
-            Record, transcribe, and analyze your AI conversations with Gemini 2.5 Pro.
+            Record, transcribe, and analyze your AI conversations with automatic 30-second chunking.
           </p>
         </div>
 
@@ -979,52 +1099,6 @@ export default function RecorderUI() {
             <AlertDescription className="whitespace-pre-line">{error}</AlertDescription>
           </Alert>
         )}
-
-        {/* Clean Instructions Card */}
-        <Card className="border-0 shadow-lg bg-gradient-to-r from-blue-50 to-indigo-50 dark:from-blue-900/20 dark:to-indigo-900/20 border-blue-200 dark:border-blue-800">
-          <CardContent className="p-6">
-            <div className="flex items-start space-x-4">
-              <div className="flex-shrink-0">
-                <div className="w-10 h-10 bg-blue-500 rounded-lg flex items-center justify-center">
-                  <Headphones className="h-5 w-5 text-white" />
-                </div>
-              </div>
-              <div className="flex-1 space-y-4">
-                <div>
-                  <h3 className="text-lg font-semibold text-blue-900 dark:text-blue-100 mb-2">
-                    🎧 Desktop Audio Setup
-                  </h3>
-                  <div className="grid md:grid-cols-2 gap-4">
-                    <div className="space-y-2">
-                      <h4 className="font-medium text-blue-800 dark:text-blue-200 flex items-center">
-                        <Settings className="h-4 w-4 mr-2" />
-                        Setup Steps
-                      </h4>
-                      <ol className="text-sm text-blue-700 dark:text-blue-300 space-y-1 list-decimal list-inside">
-                        <li>Click "Desktop" or "Both" mode</li>
-                        <li>Select tab with AI (ChatGPT, Claude, etc.)</li>
-                        <li className="font-semibold">✅ IMPORTANT: Check "Share audio"</li>
-                        <li>Click "Share" to enable AI response recording</li>
-                        <li>🎧 Use headphones to avoid echo</li>
-                      </ol>
-                    </div>
-                    <div className="space-y-2">
-                      <h4 className="font-medium text-blue-800 dark:text-blue-200 flex items-center">
-                        <HelpCircle className="h-4 w-4 mr-2" />
-                        Troubleshooting
-                      </h4>
-                      <ul className="text-sm text-blue-700 dark:text-blue-300 space-y-1">
-                        <li>• If permission denied: Reload page and try again</li>
-                        <li>• Make sure to select the correct tab/window</li>
-                        <li>• Check browser audio permissions</li>
-                      </ul>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </CardContent>
-        </Card>
 
         <Tabs defaultValue="recorder" className="w-full">
           <TabsList className="grid w-full grid-cols-3 mb-6">
@@ -1051,17 +1125,6 @@ export default function RecorderUI() {
                       className="mt-1"
                     />
                   </div>
-                  {/* Clear Session Button */}
-                  {(transcript.length > 0 || finalTranscript || finalAudioBlob) && !isRecording && (
-                    <Button
-                      onClick={handleNewRecording}
-                      variant="outline"
-                      size="sm"
-                      className="text-red-600 hover:text-red-700 border-red-300 hover:border-red-400"
-                    >
-                      🗑️ Clear Session
-                    </Button>
-                  )}
                 </div>
               </CardContent>
             </Card>
@@ -1106,6 +1169,19 @@ export default function RecorderUI() {
                     </div>
                   </div>
 
+                  {/* Reset Session Button */}
+                  {(audioChunks.length > 0 || transcript.length > 0 || finalTranscripts.length > 0) && !isRecording && (
+                    <Button
+                      onClick={handleResetSession}
+                      variant="outline"
+                      size="sm"
+                      className="text-red-600 hover:text-red-700 border-red-300 hover:border-red-400"
+                    >
+                      <RotateCcw className="h-3 w-3 mr-1" />
+                      Reset Session
+                    </Button>
+                  )}
+
                   {/* Main Recording Button */}
                   <Button
                     onClick={handleToggleRecording}
@@ -1137,10 +1213,25 @@ export default function RecorderUI() {
                         🎧 Listening for AI
                       </Badge>
                     )}
-                    <div className="flex items-center justify-center space-x-2 text-slate-600 dark:text-slate-300">
-                      <Clock className="h-4 w-4" />
-                      <span className="font-mono text-lg">{formatDuration(duration)}</span>
+                    <div className="flex items-center justify-center space-x-4 text-slate-600 dark:text-slate-300">
+                      <div className="flex items-center space-x-1">
+                        <Clock className="h-4 w-4" />
+                        <span className="font-mono text-lg">{formatDuration(duration)}</span>
+                      </div>
+                      {isRecording && (
+                        <div className="flex items-center space-x-1">
+                          <span className="text-sm">Chunk {currentChunkNumber}:</span>
+                          <span className="font-mono text-sm">
+                            {formatDuration(chunkDuration)}/{CHUNK_DURATION}s
+                          </span>
+                        </div>
+                      )}
                     </div>
+                    {audioChunks.length > 0 && (
+                      <Badge variant="outline" className="text-xs">
+                        📦 {audioChunks.length} chunks saved
+                      </Badge>
+                    )}
                   </div>
 
                   {/* Audio Waveform */}
@@ -1174,10 +1265,10 @@ export default function RecorderUI() {
                 <CardHeader>
                   <CardTitle className="flex items-center space-x-2">
                     <FileText className="h-5 w-5" />
-                    <span>Live Transcript (Persistent)</span>
+                    <span>Live Transcript</span>
                     {transcript.length > 0 && (
                       <Badge variant="secondary" className="ml-auto">
-                        💾 Saved
+                        {transcript.length} entries
                       </Badge>
                     )}
                   </CardTitle>
@@ -1236,11 +1327,9 @@ export default function RecorderUI() {
                       {transcript.length === 0 && !currentTranscript && (
                         <div className="text-center text-slate-400 dark:text-slate-500 py-12 flex flex-col items-center justify-center">
                           <FileText className="h-12 w-12 mx-auto mb-4 opacity-50" />
-                          <p>Start recording to see persistent live transcription here.</p>
+                          <p>Start recording to see live transcription here.</p>
                           <p className="text-xs mt-2">
-                            {captureMode === "desktop" || captureMode === "both"
-                              ? "Make sure to select 'Share audio' when prompted. AI responses will be auto-detected!"
-                              : "Switch to Desktop or Both mode to capture AI responses"}
+                            Audio will be automatically processed in {CHUNK_DURATION}-second chunks
                           </p>
                         </div>
                       )}
@@ -1260,12 +1349,12 @@ export default function RecorderUI() {
                 <CardContent className="space-y-4">
                   <Button
                     onClick={handleDownloadAudio}
-                    disabled={isReady || isRecording}
+                    disabled={audioChunks.length === 0}
                     className="w-full justify-start transition-opacity hover:bg-slate-100 dark:hover:bg-slate-800"
                     variant="outline"
                   >
                     <FileAudio className="h-4 w-4 mr-2" />
-                    Download Audio
+                    Download Complete Audio
                     <span className="ml-auto text-xs text-slate-500 dark:text-slate-400">MP3</span>
                   </Button>
 
@@ -1282,8 +1371,12 @@ export default function RecorderUI() {
 
                   <div className="pt-4 space-y-2 text-sm text-slate-600 dark:text-slate-300">
                     <div className="flex justify-between">
-                      <span>Duration:</span>
+                      <span>Total Duration:</span>
                       <span className="font-mono">{formatDuration(duration)}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span>Audio Chunks:</span>
+                      <span className="font-mono">{audioChunks.length}</span>
                     </div>
                     <div className="flex justify-between">
                       <span>Live Entries:</span>
@@ -1294,31 +1387,39 @@ export default function RecorderUI() {
                       <span className="font-mono capitalize">{captureMode}</span>
                     </div>
                     <div className="flex justify-between">
-                      <span>Speech Recognition:</span>
-                      <span className="font-mono">{speechRecognitionActive ? "Active" : "Inactive"}</span>
+                      <span>API Keys:</span>
+                      <span className="font-mono">{geminiApiKeys.length}</span>
                     </div>
                   </div>
                 </CardContent>
               </Card>
             </div>
 
-            {/* Final Transcript Section - Auto-starts when recording stops */}
+            {/* Final Transcript Section - Auto-processes chunks */}
             <div className="mt-6">
               <FinalTranscript
-                audioBlob={finalAudioBlob}
-                onTranscriptComplete={(transcript) => setFinalTranscript(transcript)}
+                audioChunks={audioChunks}
+                onTranscriptComplete={handleTranscriptComplete}
                 autoStart={true}
                 userName={userName}
+                liveTranscriptContext={formatLiveTranscriptForContext(transcript, userName)}
+                onResetSession={handleResetSession}
+                geminiApiKeys={geminiApiKeys}
               />
             </div>
           </TabsContent>
+
+          <TabsContent value="history" className="space-y-6">
+            <RecordingHistory />
+          </TabsContent>
+
           <TabsContent value="settings" className="space-y-6">
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
               {/* Audio Settings */}
               <AudioSettings onSettingsChange={setAudioSettings} />
 
               {/* Gemini Settings */}
-              <GeminiSettings onApiKeyChange={setGeminiApiKey} />
+              <GeminiSettings onApiKeysChange={setGeminiApiKeys} />
             </div>
           </TabsContent>
         </Tabs>
