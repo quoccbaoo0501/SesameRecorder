@@ -1,31 +1,32 @@
-import type { Metadata } from 'next'
-import './globals.css'
-import { ThemeProvider } from '@/components/theme-provider'
-import { Toaster } from '@/components/ui/sonner'
+import type React from "react"
+import type { Metadata } from "next"
+import { Inter } from "next/font/google"
+import "./globals.css"
+import { ThemeProvider } from "@/components/theme-provider"
+import Script from "next/script"
+
+const inter = Inter({ subsets: ["latin"] })
 
 export const metadata: Metadata = {
-  title: 'Sesame Recorder - AI Conversation Tool',
-  description: 'Record, transcribe, and analyze your AI conversations with ease.',
-  generator: 'v0.dev',
+  title: "Sesame Recorder - AI Conversation Recorder",
+  description: "Record, transcribe, and analyze your AI conversations with Web Speech API",
+    generator: 'v0.dev'
 }
 
 export default function RootLayout({
   children,
-}: Readonly<{
+}: {
   children: React.ReactNode
-}>) {
+}) {
   return (
     <html lang="en" suppressHydrationWarning>
-      <body className='dark'>
-        <ThemeProvider
-          attribute="class"
-          defaultTheme="dark"
-          enableSystem
-          disableTransitionOnChange
-        >
+      <body className={inter.className}>
+        <ThemeProvider attribute="class" defaultTheme="system" enableSystem disableTransitionOnChange>
           {children}
-          <Toaster position="top-right" richColors />
         </ThemeProvider>
+
+        {/* Load lamejs for MP3 conversion */}
+        <Script src="https://cdn.jsdelivr.net/npm/lamejs@1.2.0/lame.min.js" strategy="beforeInteractive" />
       </body>
     </html>
   )
