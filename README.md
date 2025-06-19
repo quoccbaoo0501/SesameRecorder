@@ -18,11 +18,3 @@ The application is deployed at [sesame-recorder.vercel.app](https://sesame-recor
 2.  Start a new recording session.
 3.  The app will capture and transcribe the audio from your active tab.
 4.  You can view the final transcript and find it in your recording history.
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-The application is deployed at [sesame-recorder.vercel.app](https://sesame-recorder.vercel.app).
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/deployment) for more details.
